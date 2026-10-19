@@ -1,0 +1,24 @@
+@warehouseFlowHost = http://localhost:5101
+
+### 获取演示 JWT
+POST {{warehouseFlowHost}}/api/auth/token
+Content-Type: application/json
+
+{ "userName": "demo", "password": "demo123" }
+
+### 查询库存（无需登录）
+GET {{warehouseFlowHost}}/api/inventory
+
+### 收货入库（将上一步 token 替换到这里）
+POST {{warehouseFlowHost}}/api/inventory/receive
+Authorization: Bearer YOUR_TOKEN
+Content-Type: application/json
+
+{ "sku": "RM-1001", "locationCode": "A-01-01", "quantity": 50, "referenceNo": "ASN-20260830-001" }
+
+### 订单预占
+POST {{warehouseFlowHost}}/api/inventory/reserve
+Authorization: Bearer YOUR_TOKEN
+Content-Type: application/json
+
+{ "sku": "RM-1001", "quantity": 20, "orderNo": "SO-20260830-001" }

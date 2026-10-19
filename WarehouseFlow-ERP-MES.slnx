@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TraceForge.Api/TraceForge.Api.csproj" />
+    <Project Path="src/WarehouseFlow.Api/WarehouseFlow.Api.csproj" />
+    <Project Path="src/WarehouseFlow.WinForms/WarehouseFlow.WinForms.csproj" />
+    <Project Path="src/WarehouseFlow.Wpf/WarehouseFlow.Wpf.csproj" />
+  </Folder>
+</Solution>

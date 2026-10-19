@@ -1,0 +1,20 @@
+namespace WarehouseFlow.Api.Contracts;
+
+public sealed record BomLineRequest(string ComponentSku, decimal Quantity, decimal ScrapRate = 0);
+public sealed record CreateBomRequest(string ProductSku, string Version, DateTime EffectiveFrom, IReadOnlyList<BomLineRequest> Lines);
+public sealed record UpdateBomRequest(string Version, DateTime EffectiveFrom, bool IsActive, IReadOnlyList<BomLineRequest> Lines);
+public sealed record CreateSalesOrderRequest(string? OrderNo, string CustomerName, DateTimeOffset RequiredAt, IReadOnlyList<OrderLineRequest> Lines, string? CustomerCode = null);
+public sealed record UpdateSalesOrderRequest(string CustomerName, DateTimeOffset RequiredAt, IReadOnlyList<OrderLineRequest> Lines, string? CustomerCode = null);
+public sealed record CreatePurchaseOrderRequest(string? OrderNo, string SupplierName, DateTimeOffset RequiredAt, IReadOnlyList<OrderLineRequest> Lines, string? SupplierCode = null);
+public sealed record UpdatePurchaseOrderRequest(string SupplierName, DateTimeOffset RequiredAt, IReadOnlyList<OrderLineRequest> Lines, string? SupplierCode = null);
+public sealed record DocumentActionRequest(string Operator, string Remark = "");
+public sealed record CreateReceiptNoticeRequest(string? NoticeNo, string SourceDocumentNo, string SupplierName, DateTimeOffset ExpectedAt, IReadOnlyList<OrderLineRequest> Lines, string? SupplierCode = null);
+public sealed record UpdateReceiptNoticeRequest(string SupplierName, DateTimeOffset ExpectedAt, IReadOnlyList<OrderLineRequest> Lines, string? SupplierCode = null);
+public sealed record CreateQualityInspectionRequest(string? InspectionNo, string InboundOrderNo, string Inspector, string Remark = "");
+public sealed record QualityInspectionLineRequest(string Sku, decimal QualifiedQuantity, decimal RejectedQuantity, string Remark = "");
+public sealed record CompleteQualityInspectionRequest(string Inspector, IReadOnlyList<QualityInspectionLineRequest> Lines);
+public sealed record CreateProductionOrderRequest(string? OrderNo, string ProductSku, decimal Quantity, DateTimeOffset RequiredAt, int? MrpSuggestionId = null, int? RoutingId = null);
+public sealed record UpdateProductionOrderRequest(string ProductSku, decimal Quantity, DateTimeOffset RequiredAt, string Operator, string Remark = "", int? RoutingId = null);
+public sealed record ProductionReceiptRequest(string? ReceiptNo, string LocationCode, decimal Quantity, string BatchNo = "UNBATCHED", DateTimeOffset? ExpiryDate = null);
+public sealed record IssueProductionMaterialsRequest(string Operator);
+public sealed record MrpRunRequest(DateTime PlanDate);

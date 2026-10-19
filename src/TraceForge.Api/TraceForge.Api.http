@@ -1,0 +1,22 @@
+@traceForgeHost = http://localhost:5102
+
+### 创建工单
+POST {{traceForgeHost}}/api/work-orders
+Content-Type: application/json
+
+{ "orderNo": "MO-20260830-001", "productCode": "FG-2001", "batchNo": "BATCH-20260830-A", "plannedQuantity": 100, "plannedStart": "2026-08-30T08:00:00+08:00" }
+
+### 工序报工
+POST {{traceForgeHost}}/api/work-orders/MO-20260830-001/reports
+Content-Type: application/json
+
+{ "operationCode": "OP-10", "workstation": "LINE-01", "goodQuantity": 96, "defectQuantity": 4, "operator": "operator-01" }
+
+### 质量检验
+POST {{traceForgeHost}}/api/work-orders/MO-20260830-001/inspections
+Content-Type: application/json
+
+{ "checkpoint": "外观检验", "result": "Passed", "remark": "抽检 10 件，无划伤", "inspector": "qc-01" }
+
+### 查询批次追溯
+GET {{traceForgeHost}}/api/trace/BATCH-20260830-A
