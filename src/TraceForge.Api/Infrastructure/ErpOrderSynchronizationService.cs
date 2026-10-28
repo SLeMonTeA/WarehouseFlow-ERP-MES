@@ -90,7 +90,8 @@ public sealed class ErpOrderSynchronizationService(WarehouseFlowClient erp, Trac
         workOrder.ReportedGoodQuantity = snapshot.ReportedGoodQuantity;
         workOrder.ReportedDefectQuantity = snapshot.ReportedDefectQuantity;
         workOrder.ErpCompletedQuantity = snapshot.CompletedQuantity;
-        workOrder.CompletedQuantity = snapshot.ReportedGoodQuantity > 0 ? snapshot.ReportedGoodQuantity : snapshot.CompletedQuantity;
+        // ERP CompletedQuantity is the quantity physically received into inventory; MES operation reports are tracked separately.
+        workOrder.CompletedQuantity = snapshot.CompletedQuantity;
         workOrder.PlannedStart = snapshot.RequiredAt;
         workOrder.Status = MapStatus(snapshot.Status);
         workOrder.ErpStarted = snapshot.Status is "InProgress" or "PartiallyCompleted" or "Completed" or "Closed";

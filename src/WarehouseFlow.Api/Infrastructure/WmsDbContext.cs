@@ -165,9 +165,11 @@ public static class WmsDbInitializer
         await EnsureIntegrationSchemaAsync(db);
         await EnsureRoutingSchemaAsync(db);
         await EnsureNumberRuleSchemaAsync(db);
-        if (!await db.DocumentNumberRules.AnyAsync())
+        var configuredRuleCodes = await db.DocumentNumberRules.Select(x => x.Code).ToListAsync();
+        var missingRules = DocumentNumberService.Defaults().Where(x => !configuredRuleCodes.Contains(x.Code, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (missingRules.Count > 0)
         {
-            db.DocumentNumberRules.AddRange(DocumentNumberService.Defaults());
+            db.DocumentNumberRules.AddRange(missingRules);
             await db.SaveChangesAsync();
         }
         if (seedDemoData && !await db.Warehouses.AnyAsync())
@@ -374,6 +376,7 @@ public static class WmsDbInitializer
         IF COL_LENGTH(N'dbo.ReceiptNotices', N'SupplierCode') IS NULL ALTER TABLE [ReceiptNotices] ADD [SupplierCode] nvarchar(450) NOT NULL CONSTRAINT [DF_ReceiptNotices_SupplierCode] DEFAULT N'';
         IF COL_LENGTH(N'dbo.InboundOrders', N'SupplierCode') IS NULL ALTER TABLE [InboundOrders] ADD [SupplierCode] nvarchar(450) NOT NULL CONSTRAINT [DF_InboundOrders_SupplierCode] DEFAULT N'';
         IF COL_LENGTH(N'dbo.Locations', N'IsActive') IS NULL ALTER TABLE [Locations] ADD [IsActive] bit NOT NULL CONSTRAINT [DF_Locations_IsActive] DEFAULT 1;
+            IF COL_LENGTH(N'dbo.Products', N'RequiresQuality') IS NULL ALTER TABLE [Products] ADD [RequiresQuality] bit NOT NULL CONSTRAINT [DF_Products_RequiresQuality] DEFAULT 0;
         """);
 
     private static Task EnsureIntegrationSchemaAsync(WmsDbContext db) => db.Database.ExecuteSqlRawAsync("""

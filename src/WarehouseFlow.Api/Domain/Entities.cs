@@ -1,6 +1,6 @@
 namespace WarehouseFlow.Api.Domain;
 
-public enum InventoryMovementType { Receive, Reserve, Release, Ship, Issue, Adjust, Transfer, QualityHold, QualityRelease, PurchaseReturn, SalesReturn }
+public enum InventoryMovementType { Receive, OtherInbound, Reserve, Release, Ship, Issue, OtherOutbound, Adjust, Transfer, QualityHold, QualityRelease, PurchaseReturn, SalesReturn }
 public enum OrderStatus { Draft, Confirmed, InProgress, Completed, Cancelled }
 
 public sealed class Warehouse
@@ -24,6 +24,7 @@ public sealed class Product
     public string Unit { get; set; } = "件";
     public decimal SafetyStock { get; set; }
     public decimal MaxStock { get; set; }
+    public bool RequiresQuality { get; set; }
     public bool IsActive { get; set; } = true;
 }
 

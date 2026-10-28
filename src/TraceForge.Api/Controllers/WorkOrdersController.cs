@@ -17,15 +17,17 @@ public sealed class WorkOrdersController(
     LumenGridClient lumenGrid,
     LumenGridExecutionDeliveryService lumenGridDelivery) : ControllerBase
 {
+    /// <summary>查询有效生产工单、工序报工进度及过程质检记录。</summary>
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken cancellationToken)
     {
         var result = await db.WorkOrders.AsNoTracking().Where(x => x.ArchivedAt == null).OrderByDescending(x => x.PlannedStart)
-            .Select(x => new { x.OrderNo, x.ProductCode, x.BatchNo, x.RoutingCode, x.RoutingVersion, x.PlannedQuantity, x.CompletedQuantity, x.ReportedGoodQuantity, x.ReportedDefectQuantity, x.ErpCompletedQuantity, x.Status, x.ErpStarted, x.ErpMaterialIssued, x.ErpQualityStatus, x.PlannedStart, operations = x.Operations.OrderBy(o => o.Sequence).Select(o => new { o.Sequence, o.OperationCode, o.OperationName, o.WorkCenter, o.RequiresQuality, o.ReportedGoodQuantity, o.ReportedDefectQuantity, o.Status }) })
+            .Select(x => new { x.OrderNo, x.ProductCode, x.BatchNo, x.RoutingCode, x.RoutingVersion, x.PlannedQuantity, x.CompletedQuantity, x.ReportedGoodQuantity, x.ReportedDefectQuantity, x.ErpCompletedQuantity, x.Status, x.ErpStarted, x.ErpMaterialIssued, x.ErpQualityStatus, x.PlannedStart, operations = x.Operations.OrderBy(o => o.Sequence).Select(o => new { o.Sequence, o.OperationCode, o.OperationName, o.WorkCenter, o.RequiresQuality, o.ReportedGoodQuantity, o.ReportedDefectQuantity, o.Status }), inspections = x.Inspections.OrderBy(i => i.InspectedAt).Select(i => new { i.OperationCode, i.Checkpoint, result = i.Result.ToString(), i.Inspector, i.InspectedAt, i.Remark }) })
             .ToListAsync(cancellationToken);
         return Ok(result);
     }
 
+    /// <summary>创建 MES 本地工单及其工序路线；ERP 同步工单使用独立同步接口。</summary>
     [HttpPost]
     public async Task<IActionResult> Create(CreateWorkOrderRequest request, CancellationToken cancellationToken)
     {
@@ -84,6 +86,7 @@ public sealed class WorkOrdersController(
         });
     }
 
+    /// <summary>按工单号查询工单、报工、质检及工序明细。</summary>
     [HttpGet("{orderNo}")]
     public async Task<IActionResult> GetByOrderNo(string orderNo, CancellationToken cancellationToken)
     {
@@ -92,12 +95,13 @@ public sealed class WorkOrdersController(
         return result is null ? NotFound() : Ok(result);
     }
 
+    /// <summary>校验设备可用状态并启动当前工序，同时向数字孪生派发执行事件。</summary>
     [HttpPost("{orderNo}/operations/{operationCode}/start")]
     public async Task<IActionResult> StartOperation(string orderNo, string operationCode, OperationExecutionRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.EventKey)) return BadRequest(new { message = "EventKey 不能为空" });
         if (string.IsNullOrWhiteSpace(request.DeviceCode)) return BadRequest(new { message = "DeviceCode 不能为空" });
-        var workOrder = await db.WorkOrders.Include(x => x.Operations).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
+        var workOrder = await db.WorkOrders.Include(x => x.Operations).Include(x => x.Inspections).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
         if (workOrder is null) return NotFound(new { message = "工单不存在" });
         if (workOrder.Status is WorkOrderStatus.Completed or WorkOrderStatus.Closed or WorkOrderStatus.Cancelled)
             return Conflict(new { message = $"工单当前状态为 {workOrder.Status}，不能开工" });
@@ -130,12 +134,13 @@ public sealed class WorkOrdersController(
         return Ok(new { workOrder.OrderNo, operation.OperationCode, operation.Status, deviceCode = device.DeviceCode, lumengrid = new { status = "Queued", eventKey = delivery.EventKey } });
     }
 
+    /// <summary>暂停当前工序并将暂停事件写入追溯及数字孪生待发送队列。</summary>
     [HttpPost("{orderNo}/operations/{operationCode}/pause")]
     public async Task<IActionResult> PauseOperation(string orderNo, string operationCode, OperationExecutionRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.EventKey)) return BadRequest(new { message = "EventKey 不能为空" });
         if (string.IsNullOrWhiteSpace(request.DeviceCode)) return BadRequest(new { message = "DeviceCode 不能为空" });
-        var workOrder = await db.WorkOrders.Include(x => x.Operations).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
+        var workOrder = await db.WorkOrders.Include(x => x.Operations).Include(x => x.Inspections).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
         if (workOrder is null) return NotFound(new { message = "工单不存在" });
         var operation = FindOperation(workOrder, operationCode);
         if (operation is null) return NotFound(new { message = "工序不存在" });
@@ -150,6 +155,7 @@ public sealed class WorkOrdersController(
         return Ok(new { workOrder.OrderNo, operation.OperationCode, operation.Status, deviceCode = request.DeviceCode, lumengrid = new { status = "Queued", eventKey = delivery.EventKey } });
     }
 
+    /// <summary>登记指定工序的良品与不良品报工，并按工艺路线执行质检门禁。</summary>
     [HttpPost("{orderNo}/reports")]
     public async Task<IActionResult> Report(string orderNo, ReportOperationRequest request, CancellationToken cancellationToken)
     {
@@ -161,7 +167,7 @@ public sealed class WorkOrdersController(
             return BadRequest(new { message = "工作站不能为空" });
         if (string.IsNullOrWhiteSpace(request.Operator))
             return BadRequest(new { message = "操作员不能为空" });
-        var workOrder = await db.WorkOrders.Include(x => x.Operations).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
+        var workOrder = await db.WorkOrders.Include(x => x.Operations).Include(x => x.Inspections).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
         if (workOrder is null) return NotFound(new { message = "工单不存在" });
         if (workOrder.Status is WorkOrderStatus.Completed or WorkOrderStatus.Closed or WorkOrderStatus.Cancelled)
             return Conflict(new { message = $"工单当前状态为 {workOrder.Status}，不能继续报工" });
@@ -180,6 +186,15 @@ public sealed class WorkOrdersController(
             if (current?.Id != operation.Id) return Conflict(new { message = $"当前应报工序为 {current?.OperationName ?? "无"}，不能跳序报工" });
             var previous = workOrder.Operations.OrderBy(x => x.Sequence).LastOrDefault(x => x.Sequence < operation.Sequence);
             operationInputQuantity = previous?.ReportedGoodQuantity ?? workOrder.PlannedQuantity;
+            var qualityGate = workOrder.Operations
+                .Where(x => x.RequiresQuality && x.Sequence < operation.Sequence)
+                .OrderByDescending(x => x.Sequence)
+                .FirstOrDefault();
+            if (qualityGate is not null && workOrder.Inspections
+                    .Where(x => x.OperationCode == qualityGate.OperationCode)
+                    .OrderByDescending(x => x.InspectedAt)
+                    .FirstOrDefault()?.Result != InspectionResult.Passed)
+                return Conflict(new { message = $"工序 {qualityGate.OperationName} 要求先完成合格质检，才能继续下一工序" });
             if (operation.ReportedGoodQuantity + operation.ReportedDefectQuantity + request.GoodQuantity + request.DefectQuantity > operationInputQuantity)
                 return Conflict(new { message = "本工序报工数量不能超过前道工序合格数量" });
             isFinalOperation = operation.Id == workOrder.Operations.OrderByDescending(x => x.Sequence).First().Id;
@@ -287,6 +302,7 @@ public sealed class WorkOrdersController(
         });
     }
 
+    /// <summary>登记工序完成后的过程质检；质检要求由工艺路线配置决定。</summary>
     [HttpPost("{orderNo}/inspections")]
     public async Task<IActionResult> Inspect(string orderNo, CreateInspectionRequest request, CancellationToken cancellationToken)
     {
@@ -296,24 +312,46 @@ public sealed class WorkOrdersController(
             return BadRequest(new { message = "检验员不能为空" });
         if (request.Result == InspectionResult.Pending)
             return BadRequest(new { message = "质检结果不能为待检" });
-        var workOrder = await db.WorkOrders.Include(x => x.Operations).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
+        var workOrder = await db.WorkOrders.Include(x => x.Operations).Include(x => x.Inspections).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
         if (workOrder is null) return NotFound(new { message = "工单不存在" });
         if (workOrder.Status is WorkOrderStatus.Closed or WorkOrderStatus.Cancelled)
             return Conflict(new { message = $"工单当前状态为 {workOrder.Status}，不能登记质检" });
-        if (string.Equals(workOrder.ErpQualityStatus, InspectionResult.Passed.ToString(), StringComparison.OrdinalIgnoreCase))
-            return Conflict(new { message = "该工单已经完成合格质检，不能重复登记；如需复检请先走返工流程" });
-        if (!await db.OperationReports.AnyAsync(x => x.WorkOrderId == workOrder.Id, cancellationToken))
+        var hasReportedQuantity = workOrder.ReportedGoodQuantity + workOrder.ReportedDefectQuantity > 0
+            || workOrder.Operations.Any(x => x.ReportedGoodQuantity + x.ReportedDefectQuantity > 0)
+            || await db.OperationReports.AnyAsync(x => x.WorkOrderId == workOrder.Id, cancellationToken);
+        if (!hasReportedQuantity)
             return Conflict(new { message = "工单尚未报工，不能登记质检" });
-        var qualityOperations = workOrder.Operations.Where(x => x.RequiresQuality).ToList();
-        if (qualityOperations.Count > 0 && !qualityOperations.Any(x => x.Status == "Completed" && x.ReportedGoodQuantity + x.ReportedDefectQuantity > 0))
-            return Conflict(new { message = "工艺路线要求质检，但需质检工序尚未完成报工" });
+        var qualityOperations = workOrder.Operations.Where(x => x.RequiresQuality).OrderBy(x => x.Sequence).ToList();
+        var inspectionOperation = qualityOperations.FirstOrDefault(operation => operation.Status == "Completed"
+            && workOrder.Inspections.Where(x => x.OperationCode == operation.OperationCode).OrderByDescending(x => x.InspectedAt).FirstOrDefault()?.Result != InspectionResult.Passed);
+        var routeCompleted = workOrder.Operations.Count == 0
+            ? workOrder.ReportedGoodQuantity + workOrder.ReportedDefectQuantity > 0 || await db.OperationReports.AnyAsync(x => x.WorkOrderId == workOrder.Id, cancellationToken)
+            : workOrder.Operations.All(x => x.Status == "Completed");
+        var finalOperation = workOrder.Operations.OrderByDescending(x => x.Sequence).FirstOrDefault();
+        var finalInspectionDue = routeCompleted && finalOperation?.RequiresQuality != true;
+        if (inspectionOperation is null && !finalInspectionDue)
+            return Conflict(new { message = "质检仅在标记了质检要求的工序报工完成后执行；无工序质检点时，请在全部工序完成后做最终检验" });
+        if (inspectionOperation is not null && !string.Equals(request.OperationCode, inspectionOperation.OperationCode, StringComparison.OrdinalIgnoreCase))
+            return Conflict(new { message = $"当前待检工序为 {inspectionOperation.OperationName}（{inspectionOperation.OperationCode}）" });
+        var inspectionOperationCode = inspectionOperation?.OperationCode ?? string.Empty;
+        var isFinalInspection = inspectionOperation is null || inspectionOperation.Id == finalOperation?.Id;
+        if (isFinalInspection && workOrder.Inspections.Where(x => x.OperationCode == inspectionOperationCode).OrderByDescending(x => x.InspectedAt).FirstOrDefault()?.Result == InspectionResult.Passed)
+            return Conflict(new { message = "最终质检已通过，不能重复登记" });
 
         var inspection = new QualityInspection
         {
-            WorkOrderId = workOrder.Id, Checkpoint = request.Checkpoint, Result = request.Result,
+            WorkOrderId = workOrder.Id, OperationCode = inspectionOperationCode, Checkpoint = request.Checkpoint, Result = request.Result,
             Remark = request.Remark, Inspector = request.Inspector
         };
-        workOrder.ErpQualityStatus = request.Result.ToString();
+        if (isFinalInspection)
+        {
+            workOrder.ErpQualityStatus = request.Result.ToString();
+            if (request.Result == InspectionResult.Passed && routeCompleted && workOrder.Status == WorkOrderStatus.InProgress)
+            {
+                workOrder.Status = WorkOrderStatus.Completed;
+                workOrder.CompletedAt = DateTimeOffset.UtcNow;
+            }
+        }
         db.QualityInspections.Add(inspection);
         db.TraceEvents.Add(new TraceEvent { BatchNo = workOrder.BatchNo, EventType = "QualityInspected", EventData = $"{request.Checkpoint}:{request.Result}" });
         await db.SaveChangesAsync(cancellationToken);
@@ -322,7 +360,7 @@ public sealed class WorkOrdersController(
         var erpSyncStatus = "NotRequired";
         string? erpSyncError = null;
         string? erpEventKey = null;
-        if (workOrder.BatchNo.StartsWith("ERP-", StringComparison.OrdinalIgnoreCase))
+        if (isFinalInspection && workOrder.BatchNo.StartsWith("ERP-", StringComparison.OrdinalIgnoreCase))
         {
             erpEventKey = $"MES-QUALITY-{Guid.NewGuid():N}";
             var delivery = new ErpQualityDelivery

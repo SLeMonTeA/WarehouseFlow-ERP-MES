@@ -72,6 +72,26 @@ public sealed class MesIntegrationController(WmsDbContext db, DocumentFlowServic
         return order is null ? NotFound(new { message = "生产订单不存在" }) : Ok(ToSnapshot(order));
     }
 
+    [HttpGet("production-locations")]
+    public async Task<IActionResult> ListProductionLocations(CancellationToken cancellationToken)
+    {
+        var locations = await db.Locations.AsNoTracking()
+            .Include(x => x.Warehouse)
+            .Where(x => x.IsActive && x.Warehouse!.IsActive)
+            .OrderBy(x => x.Warehouse!.Code)
+            .ThenBy(x => x.Code)
+            .Select(x => new
+            {
+                locationCode = x.Code,
+                x.Zone,
+                x.Capacity,
+                warehouseCode = x.Warehouse!.Code,
+                warehouseName = x.Warehouse.Name
+            })
+            .ToListAsync(cancellationToken);
+        return Ok(locations);
+    }
+
     [HttpPost("production-orders/{orderNo}/start")]
     public async Task<IActionResult> StartProduction(string orderNo, DocumentActionRequest request, CancellationToken cancellationToken)
     {
@@ -191,11 +211,13 @@ public sealed class MesIntegrationController(WmsDbContext db, DocumentFlowServic
             return Ok(new { accepted = true, duplicate = true, orderNo, qualityStatus = duplicateOrder?.QualityStatus.ToString() });
         }
 
-        var order = await db.ProductionOrders.SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
+        var order = await db.ProductionOrders.Include(x => x.Operations).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken);
         if (order is null) return NotFound(new { message = "生产订单不存在" });
         if (order.Status is PlanningDocumentStatus.Cancelled or PlanningDocumentStatus.Closed)
             return Conflict(new { message = "当前生产订单不允许登记质检" });
-        if (order.ReportedGoodQuantity + order.ReportedDefectQuantity <= 0)
+        var hasReportedQuantity = order.ReportedGoodQuantity + order.ReportedDefectQuantity > 0 ||
+            order.Operations.Any(x => x.ReportedGoodQuantity + x.ReportedDefectQuantity > 0);
+        if (!hasReportedQuantity)
             return Conflict(new { message = "生产订单尚未报工，不能登记质检" });
 
         var previousStatus = order.QualityStatus;
@@ -238,10 +260,10 @@ public sealed class MesIntegrationController(WmsDbContext db, DocumentFlowServic
         try
         {
             var operatorName = User.FindFirstValue(ClaimTypes.Name) ?? request.Operator;
-            var movements = await flow.IssueMaterialsAsync(orderNo, operatorName, cancellationToken);
+            var issue = await flow.IssueMaterialsAsync(orderNo, operatorName, cancellationToken);
             await cache.RemoveAsync("wms:inventory:all", cancellationToken);
-            await hub.Clients.All.SendAsync("InventoryChanged", new { action = "productionMaterialsIssued", orderNo }, cancellationToken);
-            return Ok(new { orderNo, operatorName, movements });
+            await hub.Clients.All.SendAsync("InventoryChanged", new { action = "productionMaterialsIssued", orderNo, issueNo = issue.IssueNo }, cancellationToken);
+            return Ok(new { issueNo = issue.IssueNo, orderNo, operatorName, movements = issue.Movements });
         }
         catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
         catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }

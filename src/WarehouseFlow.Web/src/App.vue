@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowRight, Box, Calendar, CircleCheck, Clock, DataAnalysis, Document, EditPen, Goods,
@@ -14,6 +14,7 @@ const activePage = ref('dashboard')
 const pageLoading = ref(false)
 const searchText = ref('')
 const selectedRow = ref(null)
+const businessTable = ref(null)
 const detailVisible = ref(false)
 const createVisible = ref(false)
 const receiveVisible = ref(false)
@@ -40,12 +41,18 @@ const loginLoading = ref(false)
 const loginForm = reactive({ userName: 'admin', password: 'admin123' })
 const receiveForm = reactive({ locationCode: 'A-01-01', operator: 'admin', batchNo: 'UNBATCHED', expiryDate: '' })
 const receiveLines = ref([])
+const inventoryOperationVisible = ref(false)
+const inventoryOperationSubmitting = ref(false)
+const inventoryOperationType = ref('')
+const inventoryOperationBalances = ref([])
+const inventoryOperationForm = reactive({ sku: '', locationCode: '', batchNo: 'UNBATCHED', quantity: 1, reason: '', expiryDate: '', operator: 'admin' })
 const qualityForm = reactive({ inspector: 'qc-01' })
 const qualityLines = ref([])
 const form = reactive({})
 const masterEditingKey = ref(null)
 const pageRows = reactive({})
-const dashboard = reactive({ summary: {}, movements: [] })
+const dashboard = reactive({ summary: {}, movements: [], inventory: [] })
+const dashboardInventoryFilters = reactive({ keyword: '', warehouseCode: '', locationCode: '' })
 const masterType = ref('product')
 const referenceData = reactive({ products: [], routingProducts: [], productionProducts: [], routings: [], inbounds: [], purchaseOrders: [], salesOrders: [], warehouses: [], locations: [], customers: [], suppliers: [] })
 
@@ -59,8 +66,8 @@ const navGroups = [
   { title: '工作台', items: [{ key: 'dashboard', label: '仓储总览', permission: 'Dashboard.View', icon: DataAnalysis }] },
   { title: '库存管理', items: [
     { key: 'inventory', label: '库存余额', permission: 'Inventory.View', icon: Box },
-    { key: 'inbound', label: '入库作业', permission: 'Inbound.Operate', icon: ArrowRight },
-    { key: 'outbound', label: '出库作业', permission: 'Outbound.Operate', icon: ArrowRight },
+    { key: 'inbound', label: '其他入库', permission: 'Inventory.Operate', icon: ArrowRight },
+    { key: 'outbound', label: '其他出库', permission: 'Inventory.Operate', icon: ArrowRight },
     { key: 'quality', label: '收货质检', permission: 'Quality.Operate', icon: CircleCheck },
     { key: 'returns', label: '采购/销售退货', permission: 'Returns.Operate', icon: Warning }
   ] },
@@ -77,24 +84,26 @@ const navGroups = [
     { key: 'bom', label: 'BOM 管理', permission: 'Planning.Operate', icon: List },
     { key: 'routing', label: '工艺路线', permission: 'Planning.Operate', icon: Setting },
     { key: 'mrp', label: 'MRP 运算', permission: 'Planning.Operate', icon: TrendCharts },
-    { key: 'production', label: '生产订单', permission: 'Planning.Operate', icon: Setting }
+    { key: 'production', label: '生产订单', permission: 'Planning.Operate', icon: Setting },
+    { key: 'productionIssues', label: '生产领料单', permission: 'Planning.Operate', icon: Tickets }
   ] },
   { title: '系统管理', items: [{ key: 'security', label: '用户、角色与权限', permission: 'Security.Manage', icon: Lock }, { key: 'numberRules', label: '单号规则', permission: 'MasterData.Manage', icon: Tickets }] }
 ]
 
 const pageMeta = {
   inventory: { title: '库存余额', desc: '查看现存、预占、质检冻结和可用库存。', endpoint: '/api/inventory', columns: [['sku', '物料编码'], ['productName', '物料名称'], ['locationCode', '库位'], ['batchNo', '批次'], ['onHand', '现存'], ['reserved', '预占'], ['qualityHold', '质检冻结'], ['available', '可用']] },
-  inbound: { title: '入库作业', desc: '手工建单或接收收货通知下推的入库单。', endpoint: '/api/inbound', columns: [['orderNo', '入库单号'], ['supplierName', '供应商'], ['sourceDocumentNo', '来源单据'], ['status', '状态'], ['expectedAt', '预计到货'], ['completedAt', '完成时间']] },
-  outbound: { title: '出库作业', desc: '执行库存预占、拣货发货和销售出库闭环。', endpoint: '/api/outbound', columns: [['orderNo', '出库单号'], ['customerName', '客户'], ['sourceDocumentNo', '来源单据'], ['status', '状态'], ['requiredAt', '需求日期'], ['shippedAt', '发货时间']] },
+  inbound: { title: '其他入库', desc: '创建调整单并审核过账；采购收货请在收货通知单审核时完成。', endpoint: '/api/inventory/adjustments?type=OtherInbound', columns: [['documentNo', '调整单号'], ['sku', '物料编码'], ['locationCode', '库位'], ['batchNo', '批次'], ['quantity', '数量'], ['reason', '原因'], ['status', '状态'], ['operatorName', '制单人']] },
+  outbound: { title: '其他出库', desc: '创建调整单并审核过账；发货通知审核时直接扣减销售库存。', endpoint: '/api/inventory/adjustments?type=OtherOutbound', columns: [['documentNo', '调整单号'], ['sku', '物料编码'], ['locationCode', '库位'], ['batchNo', '批次'], ['quantity', '数量'], ['reason', '原因'], ['status', '状态'], ['operatorName', '制单人']] },
   sales: { title: '销售订单', desc: '销售订单审核后下推发货通知单。', endpoint: '/api/sales-orders', columns: [['orderNo', '订单号'], ['customerName', '客户'], ['status', '状态'], ['orderDate', '订单日期'], ['requiredAt', '交期'], ['orderedQuantity', '订单数量'], ['fulfilledQuantity', '已履约']] },
-  delivery: { title: '发货通知单', desc: '来源销售订单，审核后下推销售出库单。', endpoint: '/api/delivery-notices', columns: [['noticeNo', '通知单号'], ['customerName', '客户'], ['sourceDocumentNo', '来源订单'], ['status', '状态'], ['expectedShipAt', '预计发货'], ['fulfilledQuantity', '已履约']] },
+  delivery: { title: '发货通知单', desc: '来源销售订单；审核时校验可用库存、按效期顺序扣减库存并完成发货。', endpoint: '/api/delivery-notices', columns: [['noticeNo', '通知单号'], ['customerName', '客户'], ['sourceDocumentNo', '来源订单'], ['status', '状态'], ['expectedShipAt', '预计发货'], ['fulfilledQuantity', '已履约']] },
   purchase: { title: '采购订单', desc: '采购订单审核后下推收货通知单。', endpoint: '/api/purchase-orders', columns: [['orderNo', '订单号'], ['supplierName', '供应商'], ['status', '状态'], ['orderDate', '订单日期'], ['requiredAt', '交期'], ['orderedQuantity', '订单数量'], ['receivedQuantity', '已收货']] },
-  receipt: { title: '收货通知单', desc: '来源采购订单，审核后下推采购入库单。', endpoint: '/api/receipt-notices', columns: [['noticeNo', '通知单号'], ['supplierName', '供应商'], ['sourceDocumentNo', '来源订单'], ['status', '状态'], ['expectedAt', '预计到货'], ['receivedQuantity', '已收货']] },
+  receipt: { title: '收货通知单', desc: '来源采购订单；审核时直接入库，需质检物料自动建立质检工单并隔离待检库存。', endpoint: '/api/receipt-notices', columns: [['noticeNo', '通知单号'], ['supplierName', '供应商'], ['sourceDocumentNo', '来源订单'], ['status', '状态'], ['expectedAt', '预计到货'], ['receivedQuantity', '已收货']] },
   bom: { title: 'BOM 管理', desc: '维护成品与子件用量，为 MRP 提供计算依据。', endpoint: '/api/bom', columns: [['sku', '成品编码'], ['productName', '成品名称'], ['version', '版本'], ['effectiveFrom', '生效日期'], ['isActive', '启用']] },
   routing: { title: '工艺路线', desc: '维护有 BOM 成品的标准生产工序；生产订单下达后会固化路线快照。', endpoint: '/api/routings', columns: [['productSku', '成品编码'], ['productName', '成品名称'], ['code', '路线编码'], ['version', '版本'], ['effectiveFrom', '生效日期'], ['isDefault', '默认'], ['isActive', '启用']] },
   mrp: { title: 'MRP 运算', desc: '根据销售需求、库存、未完成供应和 BOM 生成生产/采购建议；生产建议会提前校验 BOM 与默认工艺路线。', endpoint: '/api/mrp/runs', columns: [['productSku', '物料编码'], ['productName', '物料名称'], ['type', '建议类型'], ['grossRequirement', '毛需求'], ['availableInventory', '可用供应'], ['safetyStock', '安全库存'], ['netRequirement', '净需求'], ['suggestedQuantity', '建议数量'], ['sourceOrderNos', '来源订单'], ['productionReady', '生产条件'], ['productionIssue', '阻塞原因'], ['status', '状态']] },
   production: { title: '生产订单', desc: 'MRP 建议或手工创建生产订单，系统按成品默认路线固化工序，审核后下达执行。', endpoint: '/api/production-orders', columns: [['orderNo', '生产订单'], ['productSku', '成品编码'], ['productName', '成品名称'], ['routingCode', '工艺路线'], ['routingVersion', '路线版本'], ['status', '状态'], ['plannedQuantity', '计划数量'], ['completedQuantity', '已入库'], ['requiredAt', '需求日期']] },
-  quality: { title: '收货质检', desc: '对完成收货的入库单建质检单，合格后完成质量放行。', endpoint: '/api/quality-inspections', columns: [['inspectionNo', '质检单号'], ['inboundOrderNo', '来源入库单'], ['status', '状态'], ['inspector', '检验员'], ['createdAt', '创建时间']] },
+  productionIssues: { title: '生产领料单', desc: '查看 ERP 对生产订单执行领料后生成的库存扣减与批次追溯记录。', endpoint: '/api/production-material-issues', columns: [['issueNo', '领料单号'], ['orderNo', '生产订单'], ['operatorName', '领料人'], ['totalQuantity', '领料总数'], ['issuedAt', '领料时间']] },
+  quality: { title: '采购质检工单', desc: '收货通知审核后自动生成需检物料工单；检验员提交结果后，合格数量才解除冻结并进入可用库存。', endpoint: '/api/quality-inspections', columns: [['inspectionNo', '质检工单号'], ['sourceInboundOrderNo', '来源收货通知'], ['status', '状态'], ['inspector', '检验员'], ['totalInspectedQuantity', '检验数量'], ['createdAt', '创建时间']] },
   returns: { title: '采购/销售退货', desc: '登记退货单并按库存、批次和质检冻结规则执行。', endpoint: '/api/returns', columns: [['returnNo', '退货单号'], ['returnType', '退货类型'], ['sourceDocumentNo', '来源单据'], ['partnerName', '往来单位'], ['status', '状态'], ['appliedAt', '执行时间']] },
   master: { title: '基础资料', desc: '维护物料、仓库、库位及往来单位。', endpoint: '/api/master-data/products', columns: [['sku', '物料编码'], ['name', '物料名称'], ['category', '分类'], ['unit', '单位'], ['safetyStock', '安全库存'], ['maxStock', '最大库存'], ['isActive', '启用']] },
   security: { title: '用户、角色与权限', desc: '管理员以可视化方式配置角色权限并分配用户。', endpoint: '/api/security/roles', columns: [['code', '编码'], ['name', '名称'], ['isActive', '启用'], ['permissionNames', '功能权限']] }
@@ -102,7 +111,7 @@ const pageMeta = {
 }
 
 const masterDefinitions = {
-  product: { label: '物料', endpoint: '/api/master-data/products', columns: [['sku', '物料编码'], ['name', '物料名称'], ['category', '分类'], ['unit', '单位'], ['safetyStock', '安全库存'], ['maxStock', '最大库存'], ['isActive', '启用']] },
+  product: { label: '物料', endpoint: '/api/master-data/products', columns: [['sku', '物料编码'], ['name', '物料名称'], ['category', '分类'], ['unit', '单位'], ['requiresQuality', '收货需质检'], ['safetyStock', '安全库存'], ['maxStock', '最大库存'], ['isActive', '启用']] },
   warehouse: { label: '仓库', endpoint: '/api/master-data/warehouses', columns: [['code', '仓库编码'], ['name', '仓库名称'], ['address', '地址'], ['isActive', '启用']] },
   location: { label: '库位', endpoint: '/api/master-data/locations', columns: [['warehouseCode', '仓库编码'], ['code', '库位编码'], ['zone', '分区'], ['capacity', '容量'], ['isActive', '启用']] },
   customer: { label: '客户', endpoint: '/api/master-data/customers', columns: [['code', '客户编码'], ['name', '客户名称'], ['contact', '联系人'], ['phone', '电话'], ['address', '地址'], ['isActive', '启用']] },
@@ -118,13 +127,33 @@ const filteredRows = computed(() => {
   if (!query) return rows.value
   return rows.value.filter(row => JSON.stringify(row).toLowerCase().includes(query))
 })
+const dashboardInventoryRows = computed(() => {
+  const keyword = dashboardInventoryFilters.keyword.trim().toLowerCase()
+  return dashboard.inventory.filter(row =>
+    (!keyword || [row.sku, row.productName, row.category, row.batchNo].some(value => String(value || '').toLowerCase().includes(keyword))) &&
+    (!dashboardInventoryFilters.warehouseCode || row.warehouseCode === dashboardInventoryFilters.warehouseCode) &&
+    (!dashboardInventoryFilters.locationCode || row.locationCode === dashboardInventoryFilters.locationCode)
+  )
+})
+const dashboardInventoryWarehouses = computed(() => [...new Map(dashboard.inventory.map(row => [row.warehouseCode, { code: row.warehouseCode, name: row.warehouseName }])).values()])
+const dashboardInventoryLocations = computed(() => [...new Set(dashboard.inventory
+  .filter(row => !dashboardInventoryFilters.warehouseCode || row.warehouseCode === dashboardInventoryFilters.warehouseCode)
+  .map(row => row.locationCode))].sort())
+const isOtherOutbound = computed(() => inventoryOperationType.value === 'otherOutbound')
+const otherOutboundLocations = computed(() => [...new Set(inventoryOperationBalances.value
+  .filter(row => row.sku === inventoryOperationForm.sku && Number(row.available) > 0)
+  .map(row => row.locationCode))].sort())
+const otherOutboundBalanceOptions = computed(() => inventoryOperationBalances.value.filter(row =>
+  row.sku === inventoryOperationForm.sku && row.locationCode === inventoryOperationForm.locationCode && Number(row.available) > 0
+))
+const selectedOtherOutboundBalance = computed(() => otherOutboundBalanceOptions.value.find(row => row.batchNo === inventoryOperationForm.batchNo))
 const isLoggedIn = computed(() => Boolean(token.value))
-const createSupported = computed(() => ['master', 'inbound', 'outbound', 'sales', 'purchase', 'receipt', 'bom', 'routing', 'production', 'quality', 'returns'].includes(activePage.value))
+const createSupported = computed(() => ['master', 'sales', 'purchase', 'receipt', 'bom', 'routing', 'production', 'returns'].includes(activePage.value))
 const formTitle = computed(() => activePage.value === 'master' && masterEditingKey.value ? `编辑${masterTypeLabel.value}` : activePage.value === 'production' && productionEditingNo.value ? '编辑生产订单' : ({ master: `新建${masterTypeLabel.value}`, inbound: '新建入库单', outbound: '新建出库单', sales: '新建销售订单', purchase: '新建采购订单', receipt: '新建收货通知单', bom: '新建 BOM', routing: '新建工艺路线', production: '新建生产订单', quality: '新建质检单', returns: '新建退货单' }[activePage.value] || '新建业务单据'))
 const formFields = computed(() => {
   if (activePage.value === 'master') {
     const active = masterEditingKey.value ? [{ key: 'isActive', label: '是否启用', type: 'switch' }] : []
-    if (masterType.value === 'product') return [{ key: 'sku', label: '物料编码', disabled: Boolean(masterEditingKey.value) }, { key: 'barcode', label: '条码' }, { key: 'name', label: '物料名称' }, { key: 'category', label: '分类' }, { key: 'specification', label: '规格' }, { key: 'unit', label: '单位' }, { key: 'safetyStock', label: '安全库存', type: 'number' }, { key: 'maxStock', label: '最大库存', type: 'number' }, ...active]
+    if (masterType.value === 'product') return [{ key: 'sku', label: '物料编码', disabled: Boolean(masterEditingKey.value) }, { key: 'barcode', label: '条码' }, { key: 'name', label: '物料名称' }, { key: 'category', label: '分类' }, { key: 'specification', label: '规格' }, { key: 'unit', label: '单位' }, { key: 'requiresQuality', label: '收货需质检', type: 'switch' }, { key: 'safetyStock', label: '安全库存', type: 'number' }, { key: 'maxStock', label: '最大库存', type: 'number' }, ...active]
     if (masterType.value === 'warehouse') return [{ key: 'code', label: '仓库编码', disabled: Boolean(masterEditingKey.value) }, { key: 'name', label: '仓库名称' }, { key: 'address', label: '地址' }, ...active]
     if (masterType.value === 'location') return [{ key: 'warehouseCode', label: '仓库编码', type: 'reference', options: referenceOptions('warehouses'), disabled: Boolean(masterEditingKey.value) }, { key: 'code', label: '库位编码', disabled: Boolean(masterEditingKey.value) }, { key: 'zone', label: '分区' }, { key: 'capacity', label: '容量', type: 'number' }, ...active]
     return [{ key: 'code', label: `${masterTypeLabel.value}编码`, disabled: Boolean(masterEditingKey.value) }, { key: 'name', label: `${masterTypeLabel.value}名称` }, { key: 'contact', label: '联系人' }, { key: 'phone', label: '电话' }, { key: 'address', label: '地址' }, ...active]
@@ -143,11 +172,14 @@ function can(permission) { return permissions.value.includes(permission) }
 function labelStatus(value) { return statusText[value] || value || '-' }
 function displayValue(value, prop) {
   if (prop === 'status') return labelStatus(value)
-  if (prop === 'type') return ({ Production: '生产建议', Purchase: '采购建议' }[value] || value || '-')
+  if (prop === 'type') return ({ Production: '生产建议', Purchase: '采购建议', Receive: '收货入库', OtherInbound: '其他入库', OtherOutbound: '其他出库', Reserve: '库存预占', Release: '释放预占', Ship: '销售出库', Issue: '生产领料', Adjust: '库存调整', QualityHold: '待检冻结', QualityRelease: '质检放行' }[value] || value || '-')
   if (prop === 'productionReady') return value === false ? '不可下推' : '可下推'
   if (typeof value === 'boolean') return value ? '是' : '否'
   if (Array.isArray(value)) return value.join('、') || '-'
-  if (value && (prop?.toLowerCase().includes('at') || prop?.toLowerCase().includes('date'))) return new Date(value).toLocaleString()
+  if (value && /(?:at|date)$/i.test(prop || '')) {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+  }
   return value ?? '-'
 }
 
@@ -277,10 +309,18 @@ async function openPage(key) {
 }
 
 async function loadPage(key = activePage.value, showMessage = false) {
+  const selectedIdentity = key === activePage.value && selectedRow.value ? rowIdentity(selectedRow.value) : null
   if (key === 'dashboard') {
     if (!isLoggedIn.value) return
     pageLoading.value = true
-    try { [dashboard.summary, dashboard.movements] = await Promise.all([request('/api/dashboard/summary'), request('/api/dashboard/recent-movements')]); if (showMessage) ElMessage.success('看板数据已刷新') } catch (error) { ElMessage.error(`看板加载失败：${error.message}`) } finally { pageLoading.value = false }
+    try {
+      const [summary, movements, inventory] = await Promise.all([
+        request('/api/dashboard/summary'), request('/api/dashboard/recent-movements'),
+        can('Inventory.View') ? request('/api/inventory') : Promise.resolve([])
+      ])
+      dashboard.summary = summary; dashboard.movements = movements; dashboard.inventory = inventory || []
+      if (showMessage) ElMessage.success('看板数据已刷新')
+    } catch (error) { ElMessage.error(`看板加载失败：${error.message}`) } finally { pageLoading.value = false }
     return
   }
   if (!pageMeta[key]) return
@@ -300,12 +340,79 @@ async function loadPage(key = activePage.value, showMessage = false) {
     } else if (key === 'master') {
       pageRows.master = await request(masterDefinitions[masterType.value].endpoint)
     } else pageRows[key] = await request(pageMeta[key].endpoint)
+    if (key === activePage.value) {
+      selectedRow.value = selectedIdentity ? (pageRows[key] || []).find(row => rowIdentity(row) === selectedIdentity) || null : null
+      await nextTick()
+      businessTable.value?.setCurrentRow(selectedRow.value)
+    }
   } catch (error) { ElMessage.error(`${pageMeta[key].title}加载失败：${error.message}`) } finally { pageLoading.value = false }
 }
 
-function selectRow(row) { selectedRow.value = row }
-function rowNo(row) { return row?.orderNo || row?.noticeNo || row?.inspectionNo || row?.returnNo || row?.checkNo || row?.transferNo || row?.runNo || row?.code }
+function rowIdentity(row) { return row?.id != null ? `id:${row.id}` : String(rowNo(row) || '') }
+function selectRow(row) { selectedRow.value = row; businessTable.value?.setCurrentRow(row) }
+function rowNo(row) { return row?.orderNo || row?.noticeNo || row?.inspectionNo || row?.returnNo || row?.checkNo || row?.transferNo || row?.documentNo || row?.runNo || row?.sku || row?.code }
 function openDetail() { if (!selectedRow.value) return ElMessage.info('请先选择一条单据'); detailVisible.value = true }
+async function openInventoryOperation(type) {
+  if (!can('Inventory.Operate')) return ElMessage.info('当前账号没有直接库存作业权限')
+  try {
+    await loadReferenceData()
+    inventoryOperationType.value = type
+    inventoryOperationBalances.value = type === 'otherOutbound' ? await request('/api/inventory') : []
+    const firstAvailable = inventoryOperationBalances.value.find(row => Number(row.available) > 0)
+    Object.assign(inventoryOperationForm, {
+      sku: type === 'otherOutbound' ? (firstAvailable?.sku || '') : (referenceData.products[0]?.sku || ''),
+      locationCode: type === 'otherOutbound' ? (firstAvailable?.locationCode || '') : (referenceData.locations[0]?.code || ''),
+      batchNo: type === 'otherOutbound' ? (firstAvailable?.batchNo || '') : 'UNBATCHED',
+      quantity: 1,
+      reason: '',
+      expiryDate: '',
+      operator: currentUser.value?.userName || currentUser.value?.UserName || 'admin'
+    })
+    if (!referenceData.products.length || !referenceData.locations.length) return ElMessage.warning('当前没有可用物料或启用库位')
+    if (type === 'otherOutbound' && !firstAvailable) return ElMessage.warning('当前没有可直接出库的可用库存')
+    inventoryOperationVisible.value = true
+  } catch (error) { ElMessage.error(`加载库存作业选项失败：${error.message}`) }
+}
+function syncOtherOutboundSku(sku) {
+  const balance = inventoryOperationBalances.value.find(row => row.sku === sku && Number(row.available) > 0)
+  inventoryOperationForm.locationCode = balance?.locationCode || ''
+  inventoryOperationForm.batchNo = balance?.batchNo || ''
+}
+function syncOtherOutboundLocation(locationCode) {
+  const balance = inventoryOperationBalances.value.find(row => row.sku === inventoryOperationForm.sku && row.locationCode === locationCode && Number(row.available) > 0)
+  inventoryOperationForm.batchNo = balance?.batchNo || ''
+}
+async function submitInventoryOperation() {
+  if (!inventoryOperationForm.sku || !inventoryOperationForm.locationCode || !inventoryOperationForm.batchNo || Number(inventoryOperationForm.quantity) <= 0 || !inventoryOperationForm.reason.trim())
+    return ElMessage.warning('请完整填写物料、库位、批次、正数数量和作业原因')
+  if (isOtherOutbound.value && Number(inventoryOperationForm.quantity) > Number(selectedOtherOutboundBalance.value?.available || 0))
+    return ElMessage.warning(`出库数量不能超过可用库存 ${selectedOtherOutboundBalance.value?.available || 0}`)
+
+  const typeLabel = isOtherOutbound.value ? '其他出库' : '其他入库'
+  try {
+    await ElMessageBox.confirm(`确认${typeLabel} ${inventoryOperationForm.sku}，数量 ${inventoryOperationForm.quantity}，原因：${inventoryOperationForm.reason.trim()}？`, typeLabel, { type: isOtherOutbound.value ? 'warning' : 'info', confirmButtonText: `确认${typeLabel}`, cancelButtonText: '返回检查' })
+  } catch { return }
+
+  inventoryOperationSubmitting.value = true
+  try {
+    const payload = {
+      sku: inventoryOperationForm.sku,
+      locationCode: inventoryOperationForm.locationCode,
+      batchNo: inventoryOperationForm.batchNo.trim(),
+      quantity: Number(inventoryOperationForm.quantity),
+      operator: inventoryOperationForm.operator,
+      ...(isOtherOutbound.value
+        ? { reason: inventoryOperationForm.reason.trim() }
+        : { referenceNo: `其他入库：${inventoryOperationForm.reason.trim()}`, expiryDate: inventoryOperationForm.expiryDate ? new Date(`${inventoryOperationForm.expiryDate}T08:00:00Z`).toISOString() : null })
+    }
+    const created = await request('/api/inventory/adjustments', { method: 'POST', body: JSON.stringify({ ...payload, type: isOtherOutbound.value ? 'OtherOutbound' : 'OtherInbound' }) })
+    inventoryOperationVisible.value = false
+    ElMessage.success(`${typeLabel}草稿已创建，请选择单据审核后过账库存`)
+    await loadPage(activePage.value)
+    selectedRow.value = (pageRows[activePage.value] || []).find(row => row.documentNo === created.documentNo) || null
+    await nextTick(); businessTable.value?.setCurrentRow(selectedRow.value)
+  } catch (error) { ElMessage.error(`${typeLabel}失败：${error.message}`) } finally { inventoryOperationSubmitting.value = false }
+}
 async function openReceive() {
   if (!selectedRow.value) return ElMessage.info('请先选择一张入库单')
   await loadReferenceData()
@@ -362,7 +469,7 @@ async function submitQualityComplete() {
   try {
     await request(`/api/quality-inspections/${encodeURIComponent(rowNo(selectedRow.value))}/complete`, { method: 'POST', body: JSON.stringify({ inspector: qualityForm.inspector || 'qc-01', lines: qualityLines.value.map(line => ({ sku: line.sku, qualifiedQuantity: Number(line.qualifiedQuantity), rejectedQuantity: Number(line.rejectedQuantity), remark: line.remark || '' })) }) })
     qualityVisible.value = false
-    ElMessage.success('质检已完成')
+    ElMessage.success('质检已完成，合格库存已放行，不合格库存继续冻结')
     await loadPage('quality')
   } catch (error) { ElMessage.error(`完成质检失败：${error.message}`) } finally { qualitySubmitting.value = false }
 }
@@ -370,11 +477,11 @@ async function submitQualityComplete() {
 const actionDefinitions = {
   sales: [['submit', '提交审核', 'warning'], ['approve', '审核', 'success'], ['reverse-approve', '反审核', ''], ['push-delivery', '下推发货通知', 'primary'], ['cancel', '作废', 'danger']],
   purchase: [['submit', '提交审核', 'warning'], ['approve', '审核', 'success'], ['reverse-approve', '反审核', ''], ['push-receipt', '下推收货通知', 'primary'], ['cancel', '作废', 'danger']],
-  delivery: [['submit', '提交审核', 'warning'], ['approve', '审核', 'success'], ['reverse-approve', '反审核', ''], ['push-outbound', '下推销售出库', 'primary'], ['cancel', '作废', 'danger']],
-  receipt: [['submit', '提交审核', 'warning'], ['approve', '审核', 'success'], ['reverse-approve', '反审核', ''], ['push-inbound', '下推采购入库', 'primary'], ['cancel', '作废', 'danger']],
+  delivery: [['submit', '提交审核', 'warning'], ['approve', '审核并发货', 'success'], ['cancel', '作废', 'danger']],
+  receipt: [['submit', '提交审核', 'warning'], ['approve', '审核并收货', 'success'], ['cancel', '作废', 'danger']],
   production: [['edit-production', '编辑生产订单', ''], ['submit', '提交审核', 'warning'], ['approve', '审核', 'success'], ['release', '下达生产', 'primary'], ['reverse-approve', '反审核', ''], ['issue-materials', '生产领料', 'warning'], ['cancel', '作废', 'danger']],
-  inbound: [['receive', '收货入库', 'primary'], ['cancel', '取消入库', 'danger']],
-  outbound: [['reserve', '库存预占', 'warning'], ['release', '释放预占', ''], ['ship', '确认发货', 'primary'], ['cancel', '取消出库', 'danger']],
+  inbound: [['approve-adjustment', '审核入库', 'success'], ['cancel-adjustment', '作废草稿', 'danger']],
+  outbound: [['approve-adjustment', '审核出库', 'warning'], ['cancel-adjustment', '作废草稿', 'danger']],
   quality: [['submit', '提交质检', 'warning'], ['complete', '完成质检', 'success'], ['cancel', '取消质检', 'danger']],
   returns: [['apply', '执行退货', 'primary'], ['cancel', '取消退货', 'danger']],
   mrp: [['push-production', '下推生产订单', 'primary'], ['push-purchase', '下推采购订单', 'success']],
@@ -397,10 +504,20 @@ function canAction(action, row) {
   if (['reverse-approve'].includes(action)) return status === 'Approved'
   if (['release'].includes(action)) return status === 'Approved'
   if (['push-delivery', 'push-receipt', 'push-outbound', 'push-inbound'].includes(action)) return status === 'Approved'
+  if (['approve-adjustment', 'cancel-adjustment'].includes(action)) return (activePage.value === 'inbound' || activePage.value === 'outbound') && status === 'Draft'
   if (action === 'issue-materials') return activePage.value === 'production' && ['Released', 'InProgress', 'PartiallyCompleted'].includes(status) && (row.materials || []).some(line => Number(line.issuedQuantity || 0) < Number(line.requiredQuantity || 0))
+  if (activePage.value === 'outbound' && action !== 'approve-adjustment') {
+    const lines = row.lines || []
+    const hasUnreserved = lines.some(line => Number(line.pickedQuantity || 0) < Number(line.plannedQuantity || 0))
+    const hasUnshippedReservation = lines.some(line => Number(line.pickedQuantity || 0) > Number(line.shippedQuantity || 0))
+    const hasShipped = lines.some(line => Number(line.shippedQuantity || 0) > 0)
+    if (action === 'reserve') return ['Draft', 'Confirmed'].includes(status) || (status === 'InProgress' && hasUnreserved)
+    if (action === 'release') return status === 'InProgress' && hasUnshippedReservation && !hasShipped
+    if (action === 'ship') return status === 'InProgress' && hasUnshippedReservation
+    if (action === 'cancel') return !['Completed', 'Cancelled'].includes(status) && !hasShipped
+  }
   if (action === 'cancel') return !['Completed', 'Cancelled'].includes(status)
-  if (activePage.value === 'inbound') return action === 'receive' ? ['Confirmed', 'InProgress'].includes(status) : action === 'cancel' && !['Completed', 'Cancelled'].includes(status)
-  if (activePage.value === 'outbound') return action === 'reserve' ? status === 'Confirmed' : action === 'release' ? status === 'Allocated' : action === 'ship' ? ['Allocated', 'Picking'].includes(status) : action === 'cancel' && !['Shipped', 'Cancelled'].includes(status)
+  if (activePage.value === 'inbound') return false
   if (activePage.value === 'quality') return action === 'submit' ? status === 'Draft' : action === 'complete' ? status === 'Submitted' : action === 'cancel' && !['Completed', 'Cancelled'].includes(status)
   if (activePage.value === 'returns') return action === 'apply' ? ['Draft', 'Confirmed'].includes(status) : action === 'cancel' && !['Completed', 'Cancelled'].includes(status)
   if (activePage.value === 'mrp') return true
@@ -428,7 +545,16 @@ async function performAction(action) {
   if (activePage.value === 'quality' && action === 'complete') return openQualityComplete()
   const id = rowNo(selectedRow.value)
   if (!id && activePage.value !== 'mrp') return ElMessage.error('当前行缺少可操作单号')
-  if (activePage.value === 'inbound' && action === 'receive') return openReceive()
+  if (['approve-adjustment', 'cancel-adjustment'].includes(action)) {
+    try {
+      const approve = action === 'approve-adjustment'
+      await ElMessageBox.confirm(approve ? `审核 ${id} 后将立即${activePage.value === 'inbound' ? '增加' : '扣减'}库存，确认继续？` : `确认作废草稿 ${id}？`, approve ? '审核调整单' : '作废调整单', { type: 'warning', confirmButtonText: approve ? '确认过账' : '确认作废', cancelButtonText: '返回检查' })
+      await request(`/api/inventory/adjustments/${encodeURIComponent(id)}/${approve ? 'approve' : 'cancel'}`, { method: 'POST', body: '{}' })
+      ElMessage.success(approve ? `${activePage.value === 'inbound' ? '其他入库' : '其他出库'}已审核，库存已过账` : '调整单草稿已作废')
+      await loadPage()
+    } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(`审核失败：${error.message}`) }
+    return
+  }
   const labels = Object.fromEntries(pageActions.value)
   try {
     await ElMessageBox.confirm(`确认对单据 ${id || selectedRow.value.id} 执行“${labels[action]}”吗？`, labels[action], { type: action.includes('cancel') ? 'warning' : 'info', confirmButtonText: '确认执行', cancelButtonText: '取消' })
@@ -441,7 +567,9 @@ async function performAction(action) {
     else path = `/api/${activePage.value === 'sales' ? 'sales-orders' : activePage.value === 'purchase' ? 'purchase-orders' : activePage.value === 'delivery' ? 'delivery-notices' : activePage.value === 'receipt' ? 'receipt-notices' : 'production-orders'}/${encodeURIComponent(id)}/${action}`
     if (['push-delivery', 'push-receipt', 'push-outbound', 'push-inbound', 'push-production', 'push-purchase'].includes(action)) body = {}
     await request(path, { method: 'POST', body: JSON.stringify(body) })
-    ElMessage.success(`${labels[action]}已完成`)
+    if (activePage.value === 'inbound' && action === 'receive') ElMessage.success('收货已完成，库存已进入待检隔离区，质检放行前不可出库或生产领料')
+    else if (activePage.value === 'quality' && action === 'complete') ElMessage.success('质检已完成，合格库存已放行，不合格库存继续冻结')
+    else ElMessage.success(`${labels[action]}已完成`)
     await loadPage()
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(`${labels[action]}失败：${error.message}`) }
 }
@@ -495,7 +623,7 @@ async function submitNumberRule() {
 function defaultsFor(key) {
   const stamp = new Date().toISOString().replaceAll(/[-:.TZ]/g, '').slice(0, 14)
   Object.keys(form).forEach(key => delete form[key])
-  Object.assign(form, { no: `${key.toUpperCase()}-${stamp}`, partner: key === 'sales' || key === 'outbound' ? '演示客户' : '演示供应商', partnerCode: key === 'sales' || key === 'outbound' ? 'CUST-DEMO' : 'SUP-DEMO', sku: key === 'sales' || key === 'outbound' ? 'FG-2001' : 'RM-1001', barcode: `BC-${stamp}`, name: `新${masterTypeLabel.value}`, category: '通用', specification: '', unit: '件', safetyStock: 10, maxStock: 1000, code: `${masterType.value.toUpperCase()}-${stamp.slice(-5)}`, address: '', warehouseCode: 'WH-01', zone: '原料区', capacity: 1000, quantity: 10, date: new Date().toISOString().slice(0, 10), productSku: 'FG-2001', componentSku: 'RM-1001', componentQuantity: 1, scrapRate: 0.02, version: 'V1.1', inboundOrderNo: '', inspector: 'qc-01', returnType: 'PurchaseReturn', sourceDocumentNo: '', locationCode: 'A-01-01', batchNo: 'UNBATCHED', remark: '' })
+  Object.assign(form, { no: `${key.toUpperCase()}-${stamp}`, partner: key === 'sales' || key === 'outbound' ? '演示客户' : '演示供应商', partnerCode: key === 'sales' || key === 'outbound' ? 'CUST-DEMO' : 'SUP-DEMO', sku: key === 'sales' || key === 'outbound' ? 'FG-2001' : 'RM-1001', barcode: `BC-${stamp}`, name: `新${masterTypeLabel.value}`, category: '通用', specification: '', unit: '件', requiresQuality: false, safetyStock: 10, maxStock: 1000, code: `${masterType.value.toUpperCase()}-${stamp.slice(-5)}`, address: '', warehouseCode: 'WH-01', zone: '原料区', capacity: 1000, quantity: 10, date: new Date().toISOString().slice(0, 10), productSku: 'FG-2001', componentSku: 'RM-1001', componentQuantity: 1, scrapRate: 0.02, version: 'V1.1', inboundOrderNo: '', inspector: 'qc-01', returnType: 'PurchaseReturn', sourceDocumentNo: '', locationCode: 'A-01-01', batchNo: 'UNBATCHED', remark: '' })
   const partnerKind = key === 'sales' || key === 'outbound' ? 'customers' : 'suppliers'
   form.partnerCode = referenceData[partnerKind][0]?.code || form.partnerCode
   form.partner = resolveReferenceName(partnerKind, form.partnerCode) || form.partner
@@ -573,7 +701,7 @@ async function toggleMasterActive(row) {
   const key = masterType.value === 'product' ? row.sku : masterType.value === 'location' ? `${row.warehouseCode}/${row.code}` : row.code
   try {
     await ElMessageBox.confirm(active ? `停用后不能再用于新单据，但历史数据会保留。确认停用“${key}”吗？` : `确认重新启用“${key}”吗？`, `${label}${masterTypeLabel.value}`, { type: active ? 'warning' : 'info', confirmButtonText: `确认${label}`, cancelButtonText: '取消' })
-    const base = masterType.value === 'product' ? 'products' : masterType.value === 'warehouse' ? 'warehouses' : masterType.value === 'location' ? `locations/${encodeURIComponent(row.warehouseCode)}/${encodeURIComponent(row.code)}` : `${masterType.value}s/${encodeURIComponent(row.code)}`
+    const base = masterType.value === 'product' ? `products/${encodeURIComponent(row.sku)}` : masterType.value === 'warehouse' ? `warehouses/${encodeURIComponent(row.code)}` : masterType.value === 'location' ? `locations/${encodeURIComponent(row.warehouseCode)}/${encodeURIComponent(row.code)}` : `${masterType.value}s/${encodeURIComponent(row.code)}`
     await request(`/api/master-data/${base}${active ? '' : '/activate'}`, { method: active ? 'DELETE' : 'POST', ...(active ? {} : { body: '{}' }) })
     ElMessage.success(`${label}${masterTypeLabel.value}成功`)
     await loadPage('master')
@@ -584,7 +712,7 @@ function orderLines() { return [{ sku: form.sku, quantity: Number(form.quantity)
 async function submitCreate() {
   formSubmitting.value = true
   try {
-    const date = new Date(`${form.date}T08:00:00`).toISOString()
+    const date = form.date ? new Date(`${form.date}T08:00:00`).toISOString() : null
     if (form.partnerCode) {
       const partnerKind = activePage.value === 'outbound' || activePage.value === 'sales' ? 'customers' : 'suppliers'
       form.partner = resolveReferenceName(partnerKind, form.partnerCode) || form.partner
@@ -594,13 +722,13 @@ async function submitCreate() {
       const base = masterType.value === 'product' ? 'products' : masterType.value === 'warehouse' ? 'warehouses' : masterType.value === 'location' ? 'locations' : `${masterType.value}s`
       path = `/api/master-data/${base}${masterEditingKey.value && masterType.value !== 'location' ? `/${encodeURIComponent(masterEditingKey.value)}` : ''}`
       if (masterEditingKey.value && masterType.value === 'location') path = `/api/master-data/locations/${encodeURIComponent(form.warehouseCode)}/${encodeURIComponent(form.code)}`
-      if (masterType.value === 'product') body = { sku: form.sku, barcode: form.barcode, name: form.name, category: form.category, specification: form.specification, unit: form.unit, safetyStock: Number(form.safetyStock), maxStock: Number(form.maxStock) }
+      if (masterType.value === 'product') body = { sku: form.sku, barcode: form.barcode, name: form.name, category: form.category, specification: form.specification, unit: form.unit, safetyStock: Number(form.safetyStock), maxStock: Number(form.maxStock), requiresQuality: form.requiresQuality === true }
       else if (masterType.value === 'warehouse') body = { code: form.code, name: form.name, address: form.address }
       else if (masterType.value === 'location') body = { warehouseCode: form.warehouseCode, code: form.code, zone: form.zone, capacity: Number(form.capacity) }
       else body = { code: form.code, name: form.name, contact: form.contact || '', phone: form.phone || '', address: form.address || '' }
       if (masterEditingKey.value) {
         body.isActive = form.isActive !== false
-        if (masterType.value === 'product') body = { barcode: form.barcode, name: form.name, category: form.category, specification: form.specification, unit: form.unit, safetyStock: Number(form.safetyStock), maxStock: Number(form.maxStock), isActive: form.isActive !== false }
+        if (masterType.value === 'product') body = { barcode: form.barcode, name: form.name, category: form.category, specification: form.specification, unit: form.unit, safetyStock: Number(form.safetyStock), maxStock: Number(form.maxStock), isActive: form.isActive !== false, requiresQuality: form.requiresQuality === true }
         else if (masterType.value === 'warehouse') body = { name: form.name, address: form.address, isActive: form.isActive !== false }
         else if (masterType.value === 'location') body = { zone: form.zone, capacity: Number(form.capacity), isActive: form.isActive !== false }
         else body = { name: form.name, contact: form.contact || '', phone: form.phone || '', address: form.address || '', isActive: form.isActive !== false }
@@ -621,9 +749,14 @@ async function submitCreate() {
     if (activePage.value === 'returns') { path = '/api/returns'; body = { returnType: form.returnType, sourceDocumentNo: form.sourceDocumentNo, partnerName: form.partner || resolveReferenceName('customers', form.partnerCode) || resolveReferenceName('suppliers', form.partnerCode), locationCode: form.locationCode, operator: currentUser.value?.userName || 'admin', lines: [{ sku: form.sku, quantity: Number(form.quantity), batchNo: form.batchNo }] } }
     const editingMaster = activePage.value === 'master' && Boolean(masterEditingKey.value)
     const editingProduction = activePage.value === 'production' && Boolean(productionEditingNo.value)
-    await request(path, { method: editingMaster || editingProduction ? 'PUT' : 'POST', body: JSON.stringify(body) })
+    const saved = await request(path, { method: editingMaster || editingProduction ? 'PUT' : 'POST', body: JSON.stringify(body) })
     const savedTitle = formTitle.value
     createVisible.value = false; masterEditingKey.value = null; productionEditingNo.value = null; ElMessage.success(`${savedTitle}${editingMaster || editingProduction ? '已保存' : '已创建'}`); await loadPage()
+    const createdNo = saved?.documentNo || saved?.orderNo || saved?.noticeNo || saved?.inspectionNo || saved?.returnNo
+    if (createdNo && !editingMaster && !editingProduction) {
+      selectedRow.value = (pageRows[activePage.value] || []).find(row => rowNo(row) === createdNo) || null
+      await nextTick(); businessTable.value?.setCurrentRow(selectedRow.value)
+    }
   } catch (error) { ElMessage.error(`${activePage.value === 'master' && masterEditingKey.value ? '保存' : '创建'}失败：${error.message}`) } finally { formSubmitting.value = false }
 }
 
@@ -663,22 +796,101 @@ onMounted(() => { if (isLoggedIn.value) loadPage('dashboard') })
           <div class="page-heading"><div><h1>仓储总览</h1><p>从订单计划到仓储执行，集中查看 ERP/WMS 运营状态。</p></div><div class="heading-actions"><el-button :icon="Refresh" :loading="pageLoading" @click="loadPage('dashboard', true)">刷新数据</el-button><el-button type="primary" :icon="Document" @click="openPage('sales')">进入订单中心</el-button></div></div>
           <el-row :gutter="16" class="stats-row"><el-col :span="6"><div class="stat-card blue"><div class="stat-icon"><el-icon><Goods /></el-icon></div><div><span>物料品种</span><strong>{{ dashboard.summary.productCount || 0 }}</strong><small>已启用物料</small></div></div></el-col><el-col :span="6"><div class="stat-card purple"><div class="stat-icon"><Box /></div><div><span>现存库存</span><strong>{{ dashboard.summary.totalOnHand || 0 }}</strong><small>所有仓库合计</small></div></div></el-col><el-col :span="6"><div class="stat-card green"><div class="stat-icon"><CircleCheck /></div><div><span>可用库存</span><strong>{{ dashboard.summary.totalAvailable || 0 }}</strong><small>扣除预占与冻结</small></div></div></el-col><el-col :span="6"><div class="stat-card orange"><div class="stat-icon"><Warning /></div><div><span>低库存 SKU</span><strong>{{ dashboard.summary.lowStockCount || 0 }}</strong><small>需要补货关注</small></div></div></el-col></el-row>
           <el-row :gutter="16"><el-col :span="15"><div class="content-card"><div class="card-heading"><div><h2>近期库存流水</h2><span>入库、出库、预占和调整记录</span></div><el-button text type="primary" @click="openPage('inventory')">查看库存</el-button></div><el-table v-loading="pageLoading" :data="dashboard.movements" stripe><el-table-column prop="sku" label="物料编码" width="140" /><el-table-column prop="productName" label="物料名称" min-width="150" /><el-table-column prop="type" label="业务类型" width="100" /><el-table-column prop="quantity" label="数量" width="90" /><el-table-column prop="referenceNo" label="来源单据" width="175" /><el-table-column prop="createdAt" label="时间" width="170"><template #default="scope">{{ displayValue(scope.row.createdAt, 'createdAt') }}</template></el-table-column></el-table></div></el-col><el-col :span="9"><div class="content-card process-card"><div class="card-heading"><div><h2>标准业务流</h2><span>当前系统的核心操作顺序</span></div></div><div class="flow-step"><b>01</b><div><strong>销售 / 采购订单</strong><span>确认需求与交期</span></div></div><div class="flow-arrow">↓</div><div class="flow-step"><b>02</b><div><strong>通知单与审核</strong><span>来源单下推，权限审核</span></div></div><div class="flow-arrow">↓</div><div class="flow-step"><b>03</b><div><strong>仓储 / 生产执行</strong><span>收发货、质检、领料、入库</span></div></div></div></el-col></el-row>
+          <el-row v-if="can('Inventory.View')" :gutter="16">
+            <el-col :span="24">
+              <div class="content-card dashboard-inventory-card">
+                <div class="card-heading">
+                  <div><h2>即时库存明细</h2><span>按物料、仓库和库位筛选现存批次库存</span></div>
+                  <span class="inventory-result-count">{{ dashboardInventoryRows.length }} 条</span>
+                </div>
+                <div class="dashboard-stock-filters">
+                  <el-input v-model="dashboardInventoryFilters.keyword" :prefix-icon="Search" clearable placeholder="搜索物料编码、名称或批次" />
+                  <el-select v-model="dashboardInventoryFilters.warehouseCode" clearable placeholder="全部仓库" @change="dashboardInventoryFilters.locationCode = ''">
+                    <el-option v-for="warehouse in dashboardInventoryWarehouses" :key="warehouse.code" :label="`${warehouse.code} · ${warehouse.name}`" :value="warehouse.code" />
+                  </el-select>
+                  <el-select v-model="dashboardInventoryFilters.locationCode" clearable placeholder="全部库位">
+                    <el-option v-for="location in dashboardInventoryLocations" :key="location" :label="location" :value="location" />
+                  </el-select>
+                  <el-button @click="dashboardInventoryFilters.keyword = ''; dashboardInventoryFilters.warehouseCode = ''; dashboardInventoryFilters.locationCode = ''">清空筛选</el-button>
+                </div>
+                <el-table v-loading="pageLoading" :data="dashboardInventoryRows" stripe max-height="420">
+                  <el-table-column prop="sku" label="物料编码" width="135" />
+                  <el-table-column prop="productName" label="物料名称" min-width="150" />
+                  <el-table-column prop="warehouseCode" label="仓库" width="120">
+                    <template #default="scope">{{ scope.row.warehouseCode }} · {{ scope.row.warehouseName }}</template>
+                  </el-table-column>
+                  <el-table-column prop="locationCode" label="库位" width="120" />
+                  <el-table-column prop="batchNo" label="批次" min-width="130" />
+                  <el-table-column prop="onHand" label="现存" width="95" align="right" />
+                  <el-table-column prop="reserved" label="预占" width="95" align="right" />
+                  <el-table-column prop="qualityHold" label="质检冻结" width="105" align="right" />
+                  <el-table-column prop="available" label="可用" width="95" align="right" />
+                  <el-table-column prop="expiryDate" label="效期" width="170">
+                    <template #default="scope">{{ scope.row.expiryDate ? displayValue(scope.row.expiryDate, 'expiryDate') : '—' }}</template>
+                  </el-table-column>
+                  <template #empty><el-empty description="没有符合条件的库存" /></template>
+                </el-table>
+              </div>
+            </el-col>
+          </el-row>
         </section>
 
         <section v-else class="business-page">
           <div class="page-heading"><div><h1>{{ activeMeta?.title }}</h1><p>{{ activeMeta?.desc }}</p></div><div class="heading-actions"><el-select v-if="activePage === 'master'" v-model="masterType" class="master-selector" @change="masterEditingKey = null; loadPage('master')"><el-option v-for="item in Object.entries(masterDefinitions)" :key="item[0]" :label="item[1].label" :value="item[0]" /></el-select><el-button :icon="Refresh" :loading="pageLoading" @click="loadPage()">刷新</el-button><el-button v-if="activePage === 'mrp'" type="warning" :icon="TrendCharts" @click="runMrp">运行 MRP</el-button><el-button v-if="createSupported" type="primary" :icon="Plus" @click="openCreate">{{ activePage === 'master' ? `新建${masterTypeLabel}` : activePage === 'bom' ? '新建 BOM' : activePage === 'routing' ? '新建工艺路线' : '新建单据' }}</el-button></div></div>
+          <div v-if="(activePage === 'inbound' || activePage === 'outbound') && can('Inventory.Operate')" class="direct-inventory-actions">
+            <span>{{ activePage === 'inbound' ? '创建其他入库调整单，审核后增加库存；采购收货请走收货通知单。' : '创建其他出库调整单，审核后扣减可用库存；销售发货请走发货通知单。' }}</span>
+            <el-button v-if="activePage === 'inbound'" type="success" plain @click="openInventoryOperation('otherInbound')">新建其他入库</el-button>
+            <el-button v-else type="warning" plain @click="openInventoryOperation('otherOutbound')">新建其他出库</el-button>
+          </div>
           <div class="content-card">
             <div class="toolbar"><div class="toolbar-hint"><el-icon><Clock /></el-icon><span v-if="selectedRow">已选择：<b>{{ rowNo(selectedRow) || `建议 #${selectedRow.id}` }}</b></span><span v-else>选择列表中的单据后，可执行审核、下推或仓储作业</span></div><el-input v-model="searchText" :prefix-icon="Search" clearable placeholder="搜索单号、客户、SKU..." class="search-input" /></div>
             <div v-if="selectedRow && pageActions.length" class="action-bar"><span class="selection-label">当前单据：{{ rowNo(selectedRow) || `MRP 建议 #${selectedRow.id}` }}<span v-if="activePage === 'mrp' && selectedRow.productionIssue" class="action-hint">（{{ selectedRow.productionIssue }}）</span></span><el-button v-for="item in visiblePageActions" :key="item[0]" size="small" :type="item[2]" :disabled="activePage === 'mrp' && item[0] === 'push-production' && selectedRow.productionReady === false" @click="performAction(item[0])">{{ item[1] }}</el-button><el-button size="small" text @click="openDetail">查看详情</el-button></div>
-            <el-table v-loading="pageLoading" :data="filteredRows" stripe highlight-current-row @row-click="selectRow"><el-table-column v-for="column in (activeMeta?.columns || [['runNo', '运算批次'], ['planDate', '计划日期'], ['status', '状态'], ['suggestionCount', '建议数']])" :key="column[0]" :prop="column[0]" :label="column[1]" :min-width="column[0] === 'permissionNames' ? 260 : 125"><template #default="scope"><el-tag v-if="column[0] === 'status'" :type="statusType[scope.row[column[0]]]" effect="light">{{ labelStatus(scope.row[column[0]]) }}</el-tag><el-tag v-else-if="column[0] === 'isActive'" :type="scope.row[column[0]] === false ? 'danger' : 'success'" effect="light">{{ scope.row[column[0]] === false ? '停用' : '启用' }}</el-tag><span v-else>{{ displayValue(scope.row[column[0]], column[0]) }}</span></template></el-table-column><el-table-column label="操作" :width="activePage === 'master' ? 250 : activePage === 'bom' ? 220 : activePage === 'routing' ? 250 : 110" fixed="right"><template #default="scope"><template v-if="activePage === 'master'"><el-button link type="primary" @click.stop="openMasterEdit(scope.row)">编辑</el-button><el-button link :type="scope.row.isActive === false ? 'success' : 'danger'" @click.stop="toggleMasterActive(scope.row)">{{ scope.row.isActive === false ? '启用' : '停用' }}</el-button></template><template v-else-if="activePage === 'bom'"><el-button link type="primary" @click.stop="selectRow(scope.row); performAction('edit')">编辑</el-button><el-button v-if="scope.row.isActive" link type="danger" @click.stop="selectRow(scope.row); performAction('disable')">停用</el-button></template><template v-else-if="activePage === 'routing'"><el-button link type="primary" @click.stop="selectRow(scope.row); performAction('edit-routing')">编辑</el-button><el-button v-if="scope.row.isActive" link type="danger" @click.stop="selectRow(scope.row); performAction('disable-routing')">停用</el-button></template><el-button link type="primary" @click.stop="selectRow(scope.row); openDetail()">查看详情</el-button></template></el-table-column><template #empty><el-empty description="暂无数据，请刷新或新建单据" /></template></el-table>
+            <el-table ref="businessTable" v-loading="pageLoading" :data="filteredRows" stripe highlight-current-row @row-click="selectRow"><el-table-column v-for="column in (activeMeta?.columns || [['runNo', '运算批次'], ['planDate', '计划日期'], ['status', '状态'], ['suggestionCount', '建议数']])" :key="column[0]" :prop="column[0]" :label="column[1]" :min-width="column[0] === 'permissionNames' ? 260 : 125"><template #default="scope"><el-tag v-if="column[0] === 'status'" :type="statusType[scope.row[column[0]]]" effect="light">{{ labelStatus(scope.row[column[0]]) }}</el-tag><el-tag v-else-if="column[0] === 'isActive'" :type="scope.row[column[0]] === false ? 'danger' : 'success'" effect="light">{{ scope.row[column[0]] === false ? '停用' : '启用' }}</el-tag><span v-else>{{ displayValue(scope.row[column[0]], column[0]) }}</span></template></el-table-column><el-table-column label="操作" :width="activePage === 'master' ? 250 : activePage === 'bom' ? 220 : activePage === 'routing' ? 250 : 110" fixed="right"><template #default="scope"><template v-if="activePage === 'master'"><el-button link type="primary" @click.stop="openMasterEdit(scope.row)">编辑</el-button><el-button link :type="scope.row.isActive === false ? 'success' : 'danger'" @click.stop="toggleMasterActive(scope.row)">{{ scope.row.isActive === false ? '启用' : '停用' }}</el-button></template><template v-else-if="activePage === 'bom'"><el-button link type="primary" @click.stop="selectRow(scope.row); performAction('edit')">编辑</el-button><el-button v-if="scope.row.isActive" link type="danger" @click.stop="selectRow(scope.row); performAction('disable')">停用</el-button></template><template v-else-if="activePage === 'routing'"><el-button link type="primary" @click.stop="selectRow(scope.row); performAction('edit-routing')">编辑</el-button><el-button v-if="scope.row.isActive" link type="danger" @click.stop="selectRow(scope.row); performAction('disable-routing')">停用</el-button></template><el-button link type="primary" @click.stop="selectRow(scope.row); openDetail()">查看详情</el-button></template></el-table-column><template #empty><el-empty description="暂无数据，请刷新或新建单据" /></template></el-table>
           </div>
         </section>
       </el-main>
     </el-container>
   </el-container>
 
+  <el-dialog v-model="inventoryOperationVisible" :title="isOtherOutbound ? '其他出库' : '其他入库'" width="560px" destroy-on-close>
+    <el-alert :title="isOtherOutbound ? '直接扣减所选批次可用库存，不会经过订单预占；已预占、冻结或过期的数量不可出库。' : '仅用于已检验或无需质检的非采购库存；采购来料请走采购收货流程，以便先隔离待检。'" :type="isOtherOutbound ? 'warning' : 'info'" :closable="false" show-icon class="dialog-alert" />
+    <el-form label-width="95px" class="create-form">
+      <el-form-item label="物料">
+        <el-select v-model="inventoryOperationForm.sku" filterable style="width: 100%" @change="isOtherOutbound && syncOtherOutboundSku($event)">
+          <el-option v-for="item in referenceOptions('products')" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="目标库位">
+        <el-select v-model="inventoryOperationForm.locationCode" filterable style="width: 100%" @change="isOtherOutbound && syncOtherOutboundLocation($event)">
+          <el-option v-for="location in (isOtherOutbound ? otherOutboundLocations.map(code => referenceData.locations.find(item => item.code === code)).filter(Boolean) : referenceData.locations)" :key="`${location.warehouseCode}-${location.code}`" :label="`${location.warehouseCode} · ${location.code}${location.zone ? `（${location.zone}）` : ''}`" :value="location.code" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="批次">
+        <el-select v-if="isOtherOutbound" v-model="inventoryOperationForm.batchNo" style="width: 100%" placeholder="选择可用批次">
+          <el-option v-for="balance in otherOutboundBalanceOptions" :key="balance.batchNo" :label="`${balance.batchNo} · 可用 ${balance.available}`" :value="balance.batchNo" />
+        </el-select>
+        <el-input v-else v-model="inventoryOperationForm.batchNo" placeholder="例如 UNBATCHED" />
+      </el-form-item>
+      <el-form-item v-if="isOtherOutbound" label="当前可用">
+        <span>{{ selectedOtherOutboundBalance?.available ?? 0 }} {{ referenceData.products.find(item => item.sku === inventoryOperationForm.sku)?.unit || '' }}</span>
+      </el-form-item>
+      <el-form-item label="作业数量">
+        <el-input-number v-model="inventoryOperationForm.quantity" :min="0.001" :max="isOtherOutbound ? (selectedOtherOutboundBalance?.available ?? 0) : undefined" :precision="3" controls-position="right" style="width: 100%" />
+      </el-form-item>
+      <el-form-item v-if="!isOtherOutbound" label="效期（可选）">
+        <el-date-picker v-model="inventoryOperationForm.expiryDate" type="date" value-format="YYYY-MM-DD" clearable style="width: 100%" />
+      </el-form-item>
+      <el-form-item :label="isOtherOutbound ? '出库原因' : '入库原因'">
+        <el-input v-model="inventoryOperationForm.reason" type="textarea" :rows="2" :placeholder="isOtherOutbound ? '例如：样品领用、报废、内部领用' : '例如：盘盈、样品入库、其他来源'" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="inventoryOperationVisible = false">取消</el-button>
+      <el-button :type="isOtherOutbound ? 'warning' : 'success'" :loading="inventoryOperationSubmitting" @click="submitInventoryOperation">确认{{ isOtherOutbound ? '出库' : '入库' }}</el-button>
+    </template>
+  </el-dialog>
   <el-dialog v-model="loginVisible" title="登录 WarehouseFlow" width="420px" :close-on-click-modal="false"><el-form label-width="80px" @submit.prevent="login"><el-form-item label="账号"><el-input v-model="loginForm.userName" autocomplete="username" placeholder="请输入账号" /></el-form-item><el-form-item label="密码"><el-input v-model="loginForm.password" type="password" show-password autocomplete="current-password" placeholder="请输入密码" @keyup.enter="login" /></el-form-item></el-form><div class="login-tip">本地演示账号：admin / admin123</div><template #footer><el-button @click="loginVisible = false">取消</el-button><el-button type="primary" :loading="loginLoading" @click="login">登录系统</el-button></template></el-dialog>
-  <el-dialog v-model="createVisible" :title="formTitle" width="600px" destroy-on-close><el-alert v-if="!masterEditingKey && !productionEditingNo" title="保存后单据进入初始状态，请在列表中选择单据继续提交、审核或下推。" type="info" :closable="false" show-icon class="dialog-alert" /><el-alert v-if="productionEditingNo" title="仅允许修改尚未领料、尚未入库的生产订单；保存后会重新固化 BOM 与工艺路线快照。" type="warning" :closable="false" show-icon class="dialog-alert" /><el-form label-width="110px" class="create-form"><el-form-item v-for="field in formFields" :key="field.key" :label="field.label"><el-switch v-if="field.type === 'switch'" v-model="form[field.key]" active-text="启用" inactive-text="停用" /><el-input v-else-if="field.type === 'generated'" model-value="保存时由系统按规则生成" disabled /><el-select v-else-if="field.type === 'select' || field.type === 'reference'" v-model="form[field.key]" filterable clearable style="width: 100%" @change="syncReference(field.key, form[field.key])"><el-option v-for="option in field.options" :key="option.value" :label="option.label" :value="option.value" /></el-select><el-input v-else-if="field.type === 'textarea'" v-model="form[field.key]" type="textarea" :rows="3" /><el-input-number v-else-if="field.type === 'number'" v-model="form[field.key]" :min="0" :precision="3" controls-position="right" style="width: 100%" /><el-date-picker v-else-if="field.type === 'date'" v-model="form[field.key]" type="date" value-format="YYYY-MM-DD" style="width: 100%" /><el-input v-else v-model="form[field.key]" :disabled="field.disabled" :placeholder="field.placeholder" /></el-form-item></el-form><template #footer><el-button @click="createVisible = false; masterEditingKey = null; productionEditingNo = null">取消</el-button><el-button type="primary" :loading="formSubmitting" @click="submitCreate">{{ masterEditingKey || productionEditingNo ? '保存修改' : '保存草稿' }}</el-button></template></el-dialog>
+  <el-dialog v-model="createVisible" :title="formTitle" width="600px" destroy-on-close><el-alert v-if="!masterEditingKey && !productionEditingNo" title="保存后单据进入初始状态，请在列表中选择单据继续提交、审核或下推。" type="info" :closable="false" show-icon class="dialog-alert" /><el-alert v-if="productionEditingNo" title="仅允许修改尚未领料、尚未入库的生产订单；保存后会重新固化 BOM 与工艺路线快照。" type="warning" :closable="false" show-icon class="dialog-alert" /><el-form label-width="110px" class="create-form"><el-form-item v-for="field in formFields" :key="field.key" :label="field.label"><el-switch v-if="field.type === 'switch'" v-model="form[field.key]" :active-text="field.key === 'requiresQuality' ? '需质检' : '启用'" :inactive-text="field.key === 'requiresQuality' ? '免检' : '停用'" /><el-input v-else-if="field.type === 'generated'" model-value="保存时由系统按规则生成" disabled /><el-select v-else-if="field.type === 'select' || field.type === 'reference'" v-model="form[field.key]" filterable clearable style="width: 100%" @change="syncReference(field.key, form[field.key])"><el-option v-for="option in field.options" :key="option.value" :label="option.label" :value="option.value" /></el-select><el-input v-else-if="field.type === 'textarea'" v-model="form[field.key]" type="textarea" :rows="3" /><el-input-number v-else-if="field.type === 'number'" v-model="form[field.key]" :min="0" :precision="3" controls-position="right" style="width: 100%" /><el-date-picker v-else-if="field.type === 'date'" v-model="form[field.key]" type="date" value-format="YYYY-MM-DD" style="width: 100%" /><el-input v-else v-model="form[field.key]" :disabled="field.disabled" :placeholder="field.placeholder" /></el-form-item></el-form><template #footer><el-button @click="createVisible = false; masterEditingKey = null; productionEditingNo = null">取消</el-button><el-button type="primary" :loading="formSubmitting" @click="submitCreate">{{ masterEditingKey || productionEditingNo ? '保存修改' : '保存草稿' }}</el-button></template></el-dialog>
   <el-dialog v-model="numberRuleVisible" title="编辑单号规则" width="560px" destroy-on-close><el-alert title="规则只影响之后新建的单据，历史单号不会改变；停用规则后对应业务不能自动取号。" type="info" :closable="false" show-icon class="dialog-alert" /><el-form label-width="100px" class="create-form"><el-form-item label="规则编码"><el-input v-model="numberRuleForm.code" disabled /></el-form-item><el-form-item label="单据类型"><el-input v-model="numberRuleForm.name" /></el-form-item><el-form-item label="前缀"><el-input v-model="numberRuleForm.prefix" placeholder="例如 SO-" /></el-form-item><el-form-item label="日期格式"><el-input v-model="numberRuleForm.dateFormat" placeholder="例如 yyyyMMdd" /></el-form-item><el-form-item label="分隔符"><el-input v-model="numberRuleForm.separator" /></el-form-item><el-form-item label="流水长度"><el-input-number v-model="numberRuleForm.sequenceLength" :min="1" :max="12" /></el-form-item><el-form-item label="是否启用"><el-switch v-model="numberRuleForm.isActive" active-text="启用" inactive-text="停用" /></el-form-item></el-form><template #footer><el-button @click="numberRuleVisible = false">取消</el-button><el-button type="primary" :loading="numberRuleSubmitting" @click="submitNumberRule">保存规则</el-button></template></el-dialog>
   <el-dialog v-model="routingVisible" :title="routingEditingId ? '编辑工艺路线' : '新建工艺路线'" width="980px" destroy-on-close><el-alert title="工艺路线只能绑定已有有效 BOM 的成品；生产订单下达后会复制路线快照，后续修改不会影响历史工单。" type="info" :closable="false" show-icon class="dialog-alert" /><el-form label-width="100px" class="create-form"><el-form-item label="成品物料"><el-select v-model="routingForm.productSku" filterable :disabled="Boolean(routingEditingId)" style="width: 100%"><el-option v-for="option in referenceOptions('routingProducts')" :key="option.value" :label="option.label" :value="option.value" /></el-select><div v-if="!routingEditingId && !referenceData.routingProducts.length" class="form-hint">当前没有有效 BOM，请先在“BOM 管理”中维护成品 BOM。</div></el-form-item><div class="routing-header-grid"><el-form-item label="路线编码"><el-input v-model="routingForm.code" :disabled="Boolean(routingEditingId)" placeholder="例如 ROUTE-FG-001" /></el-form-item><el-form-item label="版本"><el-input v-model="routingForm.version" placeholder="例如 V1.0" /></el-form-item><el-form-item label="生效日期"><el-date-picker v-model="routingForm.effectiveFrom" type="date" value-format="YYYY-MM-DD" style="width: 100%" /></el-form-item><el-form-item label="默认路线"><el-switch v-model="routingForm.isDefault" active-text="是" inactive-text="否" /></el-form-item><el-form-item label="启用状态" v-if="routingEditingId"><el-switch v-model="routingForm.isActive" active-text="启用" inactive-text="停用" /></el-form-item></div></el-form><el-divider content-position="left">工序明细（按顺序执行）</el-divider><div class="routing-operation-list"><div v-for="(operation, index) in routingOperations" :key="index" class="routing-operation-card"><div class="operation-card-header"><div><span class="operation-index">工序 {{ index + 1 }}</span><el-tag size="small" effect="plain">第 {{ operation.sequence }} 道</el-tag></div><el-button type="danger" link @click="removeRoutingOperation(index)">删除此工序</el-button></div><div class="operation-fields"><div class="operation-field"><span class="operation-field-label">执行顺序</span><el-input-number v-model="operation.sequence" :min="1" :step="10" controls-position="right" /></div><div class="operation-field"><span class="operation-field-label">工序编码</span><el-input v-model="operation.operationCode" placeholder="如 OP-10" /></div><div class="operation-field"><span class="operation-field-label">工序名称</span><el-input v-model="operation.operationName" placeholder="如 装配" /></div><div class="operation-field"><span class="operation-field-label">工作中心</span><el-input v-model="operation.workCenter" placeholder="如 装配线 A" /></div><div class="operation-field"><span class="operation-field-label">标准分钟</span><el-input-number v-model="operation.standardMinutes" :min="0" :precision="2" controls-position="right" /></div><div class="operation-field operation-quality"><span class="operation-field-label">需要质检</span><el-switch v-model="operation.requiresQuality" active-text="是" inactive-text="否" /></div></div></div></div><el-button type="primary" plain :icon="Plus" @click="addRoutingOperation">新增工序</el-button><template #footer><el-button @click="routingVisible = false">取消</el-button><el-button type="primary" :loading="routingSubmitting" @click="submitRouting">保存工艺路线</el-button></template></el-dialog>
   <el-dialog v-model="bomEditorVisible" :title="bomEditingId ? '编辑 BOM' : '新建 BOM'" width="780px" destroy-on-close><el-alert title="BOM 是生产计划基础资料；保存后启用版本会自动成为该成品的当前有效版本。" type="info" :closable="false" show-icon class="dialog-alert" /><el-form label-width="100px" class="create-form"><el-form-item label="成品编码"><el-select v-model="bomForm.productSku" :disabled="Boolean(bomEditingId)" filterable style="width: 100%"><el-option v-for="option in referenceOptions('products')" :key="option.value" :label="option.label" :value="option.value" /></el-select></el-form-item><el-form-item label="BOM 版本"><el-input v-model="bomForm.version" placeholder="例如 V1.1" /></el-form-item><el-form-item label="生效日期"><el-date-picker v-model="bomForm.effectiveFrom" type="date" value-format="YYYY-MM-DD" style="width: 100%" /></el-form-item><el-form-item label="启用版本"><el-switch v-model="bomForm.isActive" active-text="启用" inactive-text="停用" /></el-form-item></el-form><el-divider content-position="left">子件明细</el-divider><div v-for="(line, index) in bomLines" :key="index" class="bom-line-row"><el-select v-model="line.componentSku" filterable style="width: 230px"><el-option v-for="option in referenceOptions('products')" :key="option.value" :label="option.label" :value="option.value" /></el-select><el-input-number v-model="line.quantity" :min="0.001" :precision="3" controls-position="right" /><el-input-number v-model="line.scrapRate" :min="0" :max="1" :precision="4" controls-position="right" /><el-button type="danger" link @click="removeBomLine(index)">删除</el-button></div><div class="bom-line-header"><span>子件编码</span><span>单位用量</span><span>损耗率（0-1）</span><span></span></div><el-button type="primary" plain :icon="Plus" @click="addBomLine">新增子件</el-button><template #footer><el-button @click="bomEditorVisible = false">取消</el-button><el-button type="primary" :loading="bomSubmitting" @click="submitBom">保存 BOM</el-button></template></el-dialog>

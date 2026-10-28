@@ -118,12 +118,15 @@ public sealed class InboundController(WmsDbContext db, IHubContext<InventoryHub>
                 return Conflict(new { message = $"SKU {line.Product!.Sku} 同批次效期不一致" });
             if (locationOnHand + receiving > location.Capacity) return Conflict(new { message = $"库位 {location.Code} 容量不足" });
             balance.OnHand += receiving;
+            if (line.Product!.RequiresQuality) balance.QualityHold += receiving;
             locationOnHand += receiving;
             line.ReceivedQuantity += receiving;
             receivedByProduct[line.ProductId] = receivedByProduct.GetValueOrDefault(line.ProductId) + receiving;
             var noticeLine = order.SourceReceiptNotice?.Lines.FirstOrDefault(x => x.ProductId == line.ProductId && x.PlannedQuantity > x.ReceivedQuantity);
             if (noticeLine is not null) noticeLine.ReceivedQuantity += receiving;
             db.Movements.Add(new InventoryMovement { ProductId = line.ProductId, LocationId = location.Id, Type = InventoryMovementType.Receive, Quantity = receiving, ReferenceNo = order.OrderNo, BatchNo = batchNo, ExpiryDate = expiryDate, Operator = User.FindFirstValue(ClaimTypes.Name) ?? request.Operator });
+            if (line.Product.RequiresQuality)
+                db.Movements.Add(new InventoryMovement { ProductId = line.ProductId, LocationId = location.Id, Type = InventoryMovementType.QualityHold, Quantity = receiving, ReferenceNo = order.OrderNo, BatchNo = batchNo, ExpiryDate = expiryDate, Operator = User.FindFirstValue(ClaimTypes.Name) ?? request.Operator });
         }
         if (order.Lines.All(x => x.ReceivedQuantity >= x.PlannedQuantity))
         {

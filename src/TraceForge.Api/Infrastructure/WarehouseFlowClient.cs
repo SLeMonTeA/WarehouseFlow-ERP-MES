@@ -32,6 +32,12 @@ public sealed class WarehouseFlowClient(HttpClient http, IConfiguration configur
             ?? throw new InvalidOperationException("ERP 未返回生产订单");
     }
 
+    public async Task<IReadOnlyList<ErpProductionLocation>> GetProductionLocationsAsync(CancellationToken cancellationToken)
+    {
+        using var response = await SendAsync(HttpMethod.Get, "/api/integration/mes/production-locations", null, cancellationToken);
+        return await ReadAsync<List<ErpProductionLocation>>(response, cancellationToken) ?? [];
+    }
+
     public Task<JsonElement?> StartProductionAsync(string orderNo, ErpDocumentActionRequest request, CancellationToken cancellationToken) =>
         SendJsonAsync($"/api/integration/mes/production-orders/{Uri.EscapeDataString(orderNo)}/start", request, cancellationToken);
 

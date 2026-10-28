@@ -47,6 +47,7 @@ public sealed record ErpProductionOrderEvent(
 
 public sealed record ErpDocumentActionRequest(string Operator, string Remark = "");
 public sealed record ErpIssueMaterialsRequest(string Operator);
+public sealed record ErpProductionLocation(string LocationCode, string Zone, int Capacity, string WarehouseCode, string WarehouseName);
 public sealed record ErpProductionReceiptRequest(string ReceiptNo, string LocationCode, decimal Quantity, string BatchNo = "UNBATCHED", DateTimeOffset? ExpiryDate = null);
 public sealed record ErpProductionProgressRequest(string EventKey, string OperationCode, string Workstation, decimal GoodQuantity, decimal DefectQuantity, string Operator, DateTimeOffset ReportedAt);
 public sealed record ErpProductionQualityRequest(string EventKey, string Checkpoint, string Result, string? Remark, string Inspector, DateTimeOffset InspectedAt);

@@ -24,6 +24,13 @@ public sealed class ErpIntegrationController(WarehouseFlowClient erp, TraceForge
         catch (InvalidOperationException ex) { return ToProblem(ex); }
     }
 
+    [HttpGet("production-locations")]
+    public async Task<IActionResult> GetProductionLocations(CancellationToken cancellationToken)
+    {
+        try { return Ok(await erp.GetProductionLocationsAsync(cancellationToken)); }
+        catch (InvalidOperationException ex) { return ToProblem(ex); }
+    }
+
     [HttpPost("production-orders/{orderNo}/start")]
     public async Task<IActionResult> StartProduction(string orderNo, ErpDocumentActionRequest request, CancellationToken cancellationToken)
     {

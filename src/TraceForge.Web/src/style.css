@@ -8,7 +8,7 @@ body { margin: 0; min-width: 1120px; }
 .brand strong { display: block; font-size: 17px; letter-spacing: .3px; }
 .brand small { display: block; color: #99a4ba; margin-top: 3px; font-size: 11px; }
 .nav-section-title { color: #73809b; font-size: 11px; padding: 0 14px 10px; letter-spacing: 1px; }
-.nav-item { border-radius: 9px; color: #aab4c8; padding: 11px 14px; margin: 3px 0; display: flex; align-items: center; gap: 12px; font-size: 13px; cursor: pointer; }
+.nav-item { border: 0; width: 100%; background: transparent; text-align: left; font: inherit; border-radius: 9px; color: #aab4c8; padding: 11px 14px; margin: 3px 0; display: flex; align-items: center; gap: 12px; font-size: 13px; cursor: pointer; }
 .nav-item.active, .nav-item:hover { background: #2b3650; color: #fff; }
 .nav-item.active { box-shadow: inset 3px 0 #818cf8; }
 .sidebar-footer { margin-top: auto; border-top: 1px solid #2b3650; padding-top: 14px; }

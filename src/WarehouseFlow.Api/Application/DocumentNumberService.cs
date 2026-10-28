@@ -37,6 +37,7 @@ public sealed class DocumentNumberService(WmsDbContext db)
         new() { Code = "InboundOrder", Name = "采购入库单", Prefix = "IN-" },
         new() { Code = "OutboundOrder", Name = "销售出库单", Prefix = "OUT-" },
         new() { Code = "ProductionOrder", Name = "生产订单", Prefix = "MO-" },
+        new() { Code = "ProductionIssue", Name = "生产领料单", Prefix = "MI-" },
         new() { Code = "ProductionReceipt", Name = "生产入库单", Prefix = "PR-" },
         new() { Code = "QualityInspection", Name = "质检单", Prefix = "QC-" },
         new() { Code = "InventoryReturn", Name = "退货单", Prefix = "RT-" }

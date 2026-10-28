@@ -56,7 +56,7 @@ public sealed class MasterDataController(WmsDbContext db) : ControllerBase
         var query = db.Products.AsNoTracking().AsQueryable();
         if (!string.IsNullOrWhiteSpace(keyword)) query = query.Where(x => x.Sku.Contains(keyword) || x.Name.Contains(keyword) || x.Barcode.Contains(keyword));
         if (activeOnly) query = query.Where(x => x.IsActive);
-        return Ok(await query.OrderBy(x => x.Sku).Select(x => new { x.Sku, x.Barcode, x.Name, x.Category, x.Specification, x.Unit, x.SafetyStock, x.MaxStock, x.IsActive }).ToListAsync(cancellationToken));
+        return Ok(await query.OrderBy(x => x.Sku).Select(x => new { x.Sku, x.Barcode, x.Name, x.Category, x.Specification, x.Unit, x.SafetyStock, x.MaxStock, x.RequiresQuality, x.IsActive }).ToListAsync(cancellationToken));
     }
 
     [Authorize(Policy = PermissionCodes.MasterDataManage)]
@@ -65,7 +65,7 @@ public sealed class MasterDataController(WmsDbContext db) : ControllerBase
     {
         if (await db.Products.AnyAsync(x => x.Sku == request.Sku || x.Barcode == request.Barcode, cancellationToken))
             return Conflict(new { message = "SKU 或条码已存在" });
-        var product = new Product { Sku = request.Sku, Barcode = request.Barcode, Name = request.Name, Category = request.Category, Specification = request.Specification, Unit = request.Unit, SafetyStock = request.SafetyStock, MaxStock = request.MaxStock };
+        var product = new Product { Sku = request.Sku, Barcode = request.Barcode, Name = request.Name, Category = request.Category, Specification = request.Specification, Unit = request.Unit, SafetyStock = request.SafetyStock, MaxStock = request.MaxStock, RequiresQuality = request.RequiresQuality };
         db.Products.Add(product);
         await db.SaveChangesAsync(cancellationToken);
         return Created($"/api/master-data/products/{product.Sku}", product);
@@ -79,7 +79,7 @@ public sealed class MasterDataController(WmsDbContext db) : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Unit)) return BadRequest(new { message = "物料名称和单位不能为空" });
         if (!string.Equals(product.Barcode, request.Barcode, StringComparison.OrdinalIgnoreCase) && await db.Products.AnyAsync(x => x.Id != product.Id && x.Barcode == request.Barcode, cancellationToken))
             return Conflict(new { message = "条码已存在" });
-        product.Barcode = request.Barcode.Trim(); product.Name = request.Name.Trim(); product.Category = request.Category.Trim(); product.Specification = request.Specification.Trim(); product.Unit = request.Unit.Trim(); product.SafetyStock = request.SafetyStock; product.MaxStock = request.MaxStock; product.IsActive = request.IsActive;
+        product.Barcode = request.Barcode.Trim(); product.Name = request.Name.Trim(); product.Category = request.Category.Trim(); product.Specification = request.Specification.Trim(); product.Unit = request.Unit.Trim(); product.SafetyStock = request.SafetyStock; product.MaxStock = request.MaxStock; product.RequiresQuality = request.RequiresQuality; product.IsActive = request.IsActive;
         await db.SaveChangesAsync(cancellationToken);
         return Ok(product);
     }

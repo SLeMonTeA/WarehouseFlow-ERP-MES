@@ -1,7 +1,9 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using WarehouseFlow.Api.Application;
 using WarehouseFlow.Api.Application.Documents;
 using WarehouseFlow.Api.Application.Planning;
 using WarehouseFlow.Api.Application.Partners;
@@ -264,7 +266,7 @@ public sealed class PurchaseOrdersController(WmsDbContext db, DocumentFlowServic
 [ApiController]
 [Route("api/delivery-notices")]
 [Authorize(Policy = PermissionCodes.PlanningOperate)]
-public sealed class DeliveryNoticesController(WmsDbContext db, DocumentFlowService flow, DocumentWorkflowService workflow) : ControllerBase
+public sealed class DeliveryNoticesController(WmsDbContext db, DocumentWorkflowService workflow, Microsoft.AspNetCore.SignalR.IHubContext<WarehouseFlow.Api.Realtime.InventoryHub> hub) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken cancellationToken) => Ok(await db.DeliveryNotices.AsNoTracking().Include(x => x.Lines).ThenInclude(x => x.Product).OrderByDescending(x => x.ExpectedShipAt).Select(x => new { x.NoticeNo, x.SourceDocumentNo, x.CustomerCode, x.CustomerName, x.Status, x.ExpectedShipAt, plannedQuantity = x.Lines.Sum(l => l.PlannedQuantity), fulfilledQuantity = x.Lines.Sum(l => l.FulfilledQuantity), openQuantity = x.Lines.Sum(l => l.PlannedQuantity - l.FulfilledQuantity), lines = x.Lines.Select(l => new { sku = l.Product!.Sku, productName = l.Product.Name, l.PlannedQuantity, l.PushedQuantity, l.FulfilledQuantity }) }).ToListAsync(cancellationToken));
@@ -281,9 +283,59 @@ public sealed class DeliveryNoticesController(WmsDbContext db, DocumentFlowServi
     [HttpPost("{noticeNo}/submit")]
     public Task<IActionResult> Submit(string noticeNo, DocumentActionRequest request, CancellationToken cancellationToken) => ChangeStatus(noticeNo, PlanningDocumentStatus.Submitted, request, cancellationToken);
 
+    /// <summary>审核发货通知并按效期优先规则直接扣减可用库存。</summary>
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{noticeNo}/approve")]
-    public Task<IActionResult> Approve(string noticeNo, DocumentActionRequest request, CancellationToken cancellationToken) => ChangeStatus(noticeNo, PlanningDocumentStatus.Approved, request, cancellationToken);
+    public async Task<IActionResult> Approve(string noticeNo, DocumentActionRequest request, CancellationToken cancellationToken)
+    {
+        var notice = await db.DeliveryNotices.Include(x => x.Lines).ThenInclude(x => x.Product)
+            .SingleOrDefaultAsync(x => x.NoticeNo == noticeNo, cancellationToken);
+        if (notice is null) return NotFound(new { message = "发货通知单不存在" });
+        if (notice.Status != PlanningDocumentStatus.Submitted) return Conflict(new { message = "只有已提交的发货通知单可以审核并发货" });
+        if (notice.Lines.Count == 0 || notice.Lines.Any(x => x.PlannedQuantity <= x.FulfilledQuantity)) return Conflict(new { message = "发货通知单没有待发数量" });
+
+        var now = DateTimeOffset.UtcNow;
+        var balances = await db.Inventory.Where(x => x.ExpiryDate == null || x.ExpiryDate > now)
+            .OrderBy(x => x.ExpiryDate == null).ThenBy(x => x.ExpiryDate).ThenBy(x => x.Id).ToListAsync(cancellationToken);
+        foreach (var line in notice.Lines)
+        {
+            var remaining = line.PlannedQuantity - line.FulfilledQuantity;
+            var eligible = balances.Where(x => x.ProductId == line.ProductId && x.OnHand - x.Reserved - x.QualityHold > 0).ToList();
+            if (eligible.Sum(x => x.OnHand - x.Reserved - x.QualityHold) < remaining)
+                return Conflict(new { message = $"物料 {line.Product!.Sku} 可用库存不足，审核未过账" });
+        }
+
+        var actor = User.FindFirstValue(ClaimTypes.Name) ?? request.Operator;
+        await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+        foreach (var line in notice.Lines)
+        {
+            var remaining = line.PlannedQuantity - line.FulfilledQuantity;
+            foreach (var balance in balances.Where(x => x.ProductId == line.ProductId && x.OnHand - x.Reserved - x.QualityHold > 0))
+            {
+                if (remaining <= 0) break;
+                var quantity = Math.Min(remaining, balance.OnHand - balance.Reserved - balance.QualityHold);
+                if (quantity <= 0) continue;
+                balance.OnHand -= quantity;
+                line.FulfilledQuantity += quantity;
+                remaining -= quantity;
+                db.Movements.Add(new InventoryMovement { ProductId = line.ProductId, LocationId = balance.LocationId, Type = InventoryMovementType.Ship, Quantity = -quantity, ReferenceNo = noticeNo, BatchNo = balance.BatchNo, ExpiryDate = balance.ExpiryDate, Operator = actor });
+            }
+            if (line.SourceSalesOrderLine is null && line.SourceSalesOrderLineId is not null)
+                line.SourceSalesOrderLine = await db.SalesOrderLines.SingleOrDefaultAsync(x => x.Id == line.SourceSalesOrderLineId, cancellationToken);
+            if (line.SourceSalesOrderLine is not null) line.SourceSalesOrderLine.FulfilledQuantity += line.FulfilledQuantity;
+        }
+        notice.Status = PlanningDocumentStatus.Completed;
+        if (notice.SourceSalesOrderId is int salesId)
+        {
+            var sales = await db.SalesOrders.Include(x => x.Lines).SingleOrDefaultAsync(x => x.Id == salesId, cancellationToken);
+            if (sales is not null) sales.Status = sales.Lines.All(x => x.FulfilledQuantity >= x.OrderedQuantity) ? PlanningDocumentStatus.Completed : PlanningDocumentStatus.InProgress;
+        }
+        db.DocumentAudits.Add(new DocumentAudit { DocumentType = "DeliveryNotice", DocumentNo = noticeNo, Action = "ApproveAndShip", FromStatus = PlanningDocumentStatus.Submitted.ToString(), ToStatus = notice.Status.ToString(), Operator = actor, Remark = request.Remark });
+        await db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+        await hub.Clients.All.SendAsync("InventoryChanged", new { action = "deliveryNoticeShipped", noticeNo }, cancellationToken);
+        return Ok(new { noticeNo, status = notice.Status, shipped = true });
+    }
 
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{noticeNo}/reverse-approve")]
@@ -300,29 +352,16 @@ public sealed class DeliveryNoticesController(WmsDbContext db, DocumentFlowServi
         catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
     }
 
+    /// <summary>兼容旧客户端的停用端点；发货通知审核已直接完成出库过账。</summary>
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{noticeNo}/push-outbound")]
-    public async Task<IActionResult> PushOutbound(string noticeNo, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var sourceStatus = await db.DeliveryNotices.AsNoTracking().Where(x => x.NoticeNo == noticeNo).Select(x => (PlanningDocumentStatus?)x.Status).SingleOrDefaultAsync(cancellationToken);
-            var outbound = await flow.PushDeliveryToOutboundAsync(noticeNo, cancellationToken);
-            var actor = User.FindFirstValue(ClaimTypes.Name) ?? "system";
-            db.DocumentAudits.Add(new DocumentAudit { DocumentType = "DeliveryNotice", DocumentNo = noticeNo, Action = "PushOutbound", FromStatus = sourceStatus?.ToString() ?? "", ToStatus = PlanningDocumentStatus.InProgress.ToString(), Operator = actor, Remark = $"下推销售出库单 {outbound.OrderNo}" });
-            db.DocumentAudits.Add(new DocumentAudit { DocumentType = "OutboundOrder", DocumentNo = outbound.OrderNo, Action = "CreateFromDeliveryNotice", FromStatus = "", ToStatus = outbound.Status.ToString(), Operator = actor, Remark = $"来源发货通知单 {noticeNo}" });
-            await db.SaveChangesAsync(cancellationToken);
-            return Ok(new { outbound.OrderNo, outbound.SourceDocumentNo, outbound.Status });
-        }
-        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
-        catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
-    }
+    public IActionResult PushOutbound(string noticeNo) => Conflict(new { message = "发货通知审核会直接扣减库存，不再下推独立出库单" });
 }
 
 [ApiController]
 [Route("api/receipt-notices")]
 [Authorize(Policy = PermissionCodes.PlanningOperate)]
-public sealed class ReceiptNoticesController(WmsDbContext db, DocumentFlowService flow, DocumentWorkflowService workflow, PartnerLookupService partners) : ControllerBase
+public sealed class ReceiptNoticesController(WmsDbContext db, DocumentFlowService flow, DocumentWorkflowService workflow, PartnerLookupService partners, DocumentNumberService numbers, Microsoft.AspNetCore.SignalR.IHubContext<WarehouseFlow.Api.Realtime.InventoryHub> hub) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken cancellationToken) => Ok(await db.ReceiptNotices.AsNoTracking().Include(x => x.Lines).ThenInclude(x => x.Product).OrderByDescending(x => x.ExpectedAt).Select(x => new { x.NoticeNo, x.SourceDocumentNo, x.SupplierCode, x.SupplierName, x.Status, x.ExpectedAt, plannedQuantity = x.Lines.Sum(l => l.PlannedQuantity), receivedQuantity = x.Lines.Sum(l => l.ReceivedQuantity), openQuantity = x.Lines.Sum(l => l.PlannedQuantity - l.ReceivedQuantity), lines = x.Lines.Select(l => new { sku = l.Product!.Sku, productName = l.Product.Name, l.PlannedQuantity, l.ReceivedQuantity }) }).ToListAsync(cancellationToken));
@@ -370,9 +409,76 @@ public sealed class ReceiptNoticesController(WmsDbContext db, DocumentFlowServic
     [HttpPost("{noticeNo}/submit")]
     public Task<IActionResult> Submit(string noticeNo, DocumentActionRequest request, CancellationToken cancellationToken) => ChangeStatus(noticeNo, PlanningDocumentStatus.Submitted, request, cancellationToken);
 
+    /// <summary>审核收货通知并直接过账库存；需要质检的物料自动生成质检工单并隔离库存。</summary>
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{noticeNo}/approve")]
-    public Task<IActionResult> Approve(string noticeNo, DocumentActionRequest request, CancellationToken cancellationToken) => ChangeStatus(noticeNo, PlanningDocumentStatus.Approved, request, cancellationToken);
+    public async Task<IActionResult> Approve(string noticeNo, DocumentActionRequest request, CancellationToken cancellationToken)
+    {
+        var notice = await db.ReceiptNotices.Include(x => x.Lines).ThenInclude(x => x.Product)
+            .SingleOrDefaultAsync(x => x.NoticeNo == noticeNo, cancellationToken);
+        if (notice is null) return NotFound(new { message = "收货通知单不存在" });
+        if (notice.Status != PlanningDocumentStatus.Submitted) return Conflict(new { message = "只有已提交的收货通知单可以审核并收货" });
+        if (notice.Lines.Count == 0 || notice.Lines.Any(x => x.PlannedQuantity <= x.ReceivedQuantity)) return Conflict(new { message = "收货通知单没有待收数量" });
+        var location = await db.Locations.Where(x => x.IsActive).OrderByDescending(x => x.Zone.Contains("原料")).ThenBy(x => x.Id).FirstOrDefaultAsync(cancellationToken);
+        if (location is null) return Conflict(new { message = "没有启用的收货库位，请先维护库位" });
+
+        var actor = User.FindFirstValue(ClaimTypes.Name) ?? request.Operator;
+        var batchNo = notice.NoticeNo;
+        var inspections = notice.Lines.Where(x => x.Product!.RequiresQuality && x.PlannedQuantity > x.ReceivedQuantity).ToList();
+        await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+        var locationOnHand = await db.Inventory.Where(x => x.LocationId == location.Id).SumAsync(x => x.OnHand, cancellationToken);
+        foreach (var line in notice.Lines)
+        {
+            var quantity = line.PlannedQuantity - line.ReceivedQuantity;
+            if (locationOnHand + quantity > location.Capacity) return Conflict(new { message = $"库位 {location.Code} 容量不足，未执行收货" });
+            var balance = await db.Inventory.SingleOrDefaultAsync(x => x.ProductId == line.ProductId && x.LocationId == location.Id && x.BatchNo == batchNo, cancellationToken);
+            if (balance is null)
+            {
+                balance = new InventoryBalance { ProductId = line.ProductId, LocationId = location.Id, BatchNo = batchNo };
+                db.Inventory.Add(balance);
+            }
+            balance.OnHand += quantity;
+            if (line.Product!.RequiresQuality) balance.QualityHold += quantity;
+            locationOnHand += quantity;
+            line.ReceivedQuantity += quantity;
+            db.Movements.Add(new InventoryMovement { ProductId = line.ProductId, LocationId = location.Id, Type = InventoryMovementType.Receive, Quantity = quantity, ReferenceNo = noticeNo, BatchNo = batchNo, Operator = actor });
+            if (line.Product.RequiresQuality)
+                db.Movements.Add(new InventoryMovement { ProductId = line.ProductId, LocationId = location.Id, Type = InventoryMovementType.QualityHold, Quantity = quantity, ReferenceNo = noticeNo, BatchNo = batchNo, Operator = actor });
+        }
+        notice.Status = PlanningDocumentStatus.Completed;
+        QualityInspection? inspection = null;
+        if (inspections.Count > 0)
+        {
+            inspection = new QualityInspection { InspectionNo = await numbers.NextAsync("QualityInspection", cancellationToken), SourceInboundOrderNo = noticeNo, SupplierName = notice.SupplierName, Inspector = actor, Remark = $"收货通知单 {noticeNo} 自动生成质检工单" };
+            inspection.Lines.AddRange(inspections.Select(x => new QualityInspectionLine { ProductId = x.ProductId, ReceivedQuantity = x.PlannedQuantity }));
+            db.QualityInspections.Add(inspection);
+            db.DocumentRelations.Add(new DocumentRelation { SourceType = "ReceiptNotice", SourceNo = noticeNo, TargetType = "QualityInspection", TargetNo = inspection.InspectionNo, Quantity = inspection.Lines.Sum(x => x.ReceivedQuantity) });
+        }
+        if (!string.IsNullOrWhiteSpace(notice.SourceDocumentNo) && notice.SourceDocumentNo != "手工建单")
+        {
+            var purchase = await db.PurchaseOrders.Include(x => x.Lines).SingleOrDefaultAsync(x => x.OrderNo == notice.SourceDocumentNo, cancellationToken);
+            if (purchase is not null)
+            {
+                foreach (var line in notice.Lines)
+                {
+                    var remaining = line.PlannedQuantity;
+                    foreach (var source in purchase.Lines.Where(x => x.ProductId == line.ProductId && x.ReceivedQuantity < x.OrderedQuantity))
+                    {
+                        var quantity = Math.Min(remaining, source.OrderedQuantity - source.ReceivedQuantity);
+                        source.ReceivedQuantity += quantity;
+                        remaining -= quantity;
+                        if (remaining <= 0) break;
+                    }
+                }
+                purchase.Status = purchase.Lines.All(x => x.ReceivedQuantity >= x.OrderedQuantity) ? PlanningDocumentStatus.Completed : PlanningDocumentStatus.InProgress;
+            }
+        }
+        db.DocumentAudits.Add(new DocumentAudit { DocumentType = "ReceiptNotice", DocumentNo = noticeNo, Action = "ApproveAndReceive", FromStatus = PlanningDocumentStatus.Submitted.ToString(), ToStatus = notice.Status.ToString(), Operator = actor, Remark = request.Remark });
+        await db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+        await hub.Clients.All.SendAsync("InventoryChanged", new { action = "receiptNoticeReceived", noticeNo }, cancellationToken);
+        return Ok(new { noticeNo, status = notice.Status, locationCode = location.Code, qualityInspectionNo = inspection?.InspectionNo, qualityRequiredCount = inspections.Count });
+    }
 
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{noticeNo}/reverse-approve")]
@@ -389,23 +495,10 @@ public sealed class ReceiptNoticesController(WmsDbContext db, DocumentFlowServic
         catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
     }
 
+    /// <summary>兼容旧客户端的停用端点；收货通知审核已直接完成入库过账。</summary>
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{noticeNo}/push-inbound")]
-    public async Task<IActionResult> PushInbound(string noticeNo, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var sourceStatus = await db.ReceiptNotices.AsNoTracking().Where(x => x.NoticeNo == noticeNo).Select(x => (PlanningDocumentStatus?)x.Status).SingleOrDefaultAsync(cancellationToken);
-            var inbound = await flow.PushReceiptToInboundAsync(noticeNo, cancellationToken);
-            var actor = User.FindFirstValue(ClaimTypes.Name) ?? "system";
-            db.DocumentAudits.Add(new DocumentAudit { DocumentType = "ReceiptNotice", DocumentNo = noticeNo, Action = "PushInbound", FromStatus = sourceStatus?.ToString() ?? "", ToStatus = PlanningDocumentStatus.InProgress.ToString(), Operator = actor, Remark = $"下推采购入库单 {inbound.OrderNo}" });
-            db.DocumentAudits.Add(new DocumentAudit { DocumentType = "InboundOrder", DocumentNo = inbound.OrderNo, Action = "CreateFromReceiptNotice", FromStatus = "", ToStatus = inbound.Status.ToString(), Operator = actor, Remark = $"来源收货通知单 {noticeNo}" });
-            await db.SaveChangesAsync(cancellationToken);
-            return Ok(new { inbound.OrderNo, inbound.SourceDocumentNo, inbound.Status });
-        }
-        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
-        catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
-    }
+    public IActionResult PushInbound(string noticeNo) => Conflict(new { message = "收货通知审核会直接入库，不再下推独立入库单" });
 }
 
 [ApiController]
@@ -594,13 +687,41 @@ public sealed class ProductionOrdersController(WmsDbContext db, DocumentFlowServ
         catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
     }
 
+    /// <summary>按生产订单物料需求执行领料并生成可追溯的生产领料单。</summary>
     [Authorize(Policy = PermissionCodes.PlanningOperate)]
     [HttpPost("{orderNo}/issue-materials")]
     public async Task<IActionResult> IssueMaterials(string orderNo, IssueProductionMaterialsRequest request, CancellationToken cancellationToken)
     {
-        try { return Ok(new { orderNo, movements = await flow.IssueMaterialsAsync(orderNo, User.FindFirstValue(ClaimTypes.Name) ?? request.Operator, cancellationToken) }); }
+        try { var issue = await flow.IssueMaterialsAsync(orderNo, User.FindFirstValue(ClaimTypes.Name) ?? request.Operator, cancellationToken); return Ok(new { orderNo, issueNo = issue.IssueNo, movements = issue.Movements }); }
         catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
         catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+    }
+}
+
+[ApiController]
+[Route("api/production-material-issues")]
+[Authorize(Policy = PermissionCodes.PlanningOperate)]
+public sealed class ProductionMaterialIssuesController(WmsDbContext db) : ControllerBase
+{
+    /// <summary>查询生产领料单及对应物料、批次、库位和领料数量。</summary>
+    [HttpGet]
+    public async Task<IActionResult> List(CancellationToken cancellationToken)
+    {
+        var headers = await db.DocumentAudits.AsNoTracking()
+            .Where(x => x.DocumentType == "ProductionMaterialIssue" && x.Action == "Issue")
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(x => new { issueNo = x.DocumentNo, orderNo = x.Remark, operatorName = x.Operator, issuedAt = x.CreatedAt })
+            .ToListAsync(cancellationToken);
+        var numbers = headers.Select(x => x.issueNo).ToList();
+        var lines = await db.Movements.AsNoTracking().Include(x => x.Product).Include(x => x.Location)
+            .Where(x => x.Type == InventoryMovementType.Issue && numbers.Contains(x.ReferenceNo))
+            .Select(x => new { issueNo = x.ReferenceNo, sku = x.Product!.Sku, productName = x.Product.Name, locationCode = x.Location!.Code, x.BatchNo, quantity = -x.Quantity, x.CreatedAt })
+            .ToListAsync(cancellationToken);
+        return Ok(headers.Select(header =>
+        {
+            var issueLines = lines.Where(line => line.issueNo == header.issueNo).ToList();
+            return new { header.issueNo, header.orderNo, header.operatorName, header.issuedAt, totalQuantity = issueLines.Sum(x => x.quantity), lines = issueLines };
+        }));
     }
 }
 

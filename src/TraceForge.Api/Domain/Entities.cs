@@ -65,6 +65,7 @@ public sealed class QualityInspection
 {
     public long Id { get; set; }
     public int WorkOrderId { get; set; }
+    public string OperationCode { get; set; } = string.Empty;
     public string Checkpoint { get; set; } = string.Empty;
     public InspectionResult Result { get; set; } = InspectionResult.Pending;
     public string? Remark { get; set; }

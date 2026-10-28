@@ -370,14 +370,18 @@ public sealed class DocumentFlowService(WmsDbContext db, PartnerLookupService pa
         return receipt;
     }
 
-    public async Task<IReadOnlyList<object>> IssueMaterialsAsync(string orderNo, string operatorName, CancellationToken cancellationToken)
+    public async Task<(string IssueNo, IReadOnlyList<object> Movements)> IssueMaterialsAsync(string orderNo, string operatorName, CancellationToken cancellationToken)
     {
         var order = await db.ProductionOrders.Include(x => x.Materials).SingleOrDefaultAsync(x => x.OrderNo == orderNo, cancellationToken)
             ?? throw new KeyNotFoundException("生产订单不存在");
         if (order.Status is not (PlanningDocumentStatus.Released or PlanningDocumentStatus.InProgress or PlanningDocumentStatus.PartiallyCompleted))
             throw new InvalidOperationException("生产订单必须下达后才能领料");
+        if (!order.Materials.Any(x => x.RequiredQuantity > x.IssuedQuantity))
+            throw new InvalidOperationException("当前生产订单没有待领用的物料");
+        var issueNo = await numbers.NextAsync("ProductionIssue", cancellationToken);
         await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
         var movements = new List<object>();
+        var totalIssued = 0m;
         foreach (var material in order.Materials)
         {
             var required = material.RequiredQuantity - material.IssuedQuantity;
@@ -395,14 +399,33 @@ public sealed class DocumentFlowService(WmsDbContext db, PartnerLookupService pa
                 balance.OnHand -= issued;
                 material.IssuedQuantity += issued;
                 remaining -= issued;
-                db.Movements.Add(new InventoryMovement { ProductId = material.ComponentProductId, LocationId = balance.LocationId, Type = InventoryMovementType.Issue, Quantity = issued, ReferenceNo = order.OrderNo, BatchNo = balance.BatchNo, ExpiryDate = balance.ExpiryDate, Operator = operatorName });
-                movements.Add(new { material.ComponentProductId, balance.LocationId, quantity = issued });
+                totalIssued += issued;
+                db.Movements.Add(new InventoryMovement { ProductId = material.ComponentProductId, LocationId = balance.LocationId, Type = InventoryMovementType.Issue, Quantity = -issued, ReferenceNo = issueNo, BatchNo = balance.BatchNo, ExpiryDate = balance.ExpiryDate, Operator = operatorName });
+                movements.Add(new { material.ComponentProductId, locationId = balance.LocationId, balance.BatchNo, quantity = issued });
             }
         }
         order.Status = PlanningDocumentStatus.InProgress;
+        db.DocumentAudits.Add(new DocumentAudit
+        {
+            DocumentType = "ProductionMaterialIssue",
+            DocumentNo = issueNo,
+            Action = "Issue",
+            FromStatus = "Draft",
+            ToStatus = "Completed",
+            Operator = operatorName,
+            Remark = order.OrderNo
+        });
+        db.DocumentRelations.Add(new DocumentRelation
+        {
+            SourceType = "ProductionOrder",
+            SourceNo = order.OrderNo,
+            TargetType = "ProductionMaterialIssue",
+            TargetNo = issueNo,
+            Quantity = totalIssued
+        });
         await db.SaveChangesAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
-        return movements;
+        return (issueNo, movements);
     }
 
     private async Task<Dictionary<string, Product>> ResolveProductsAsync(IReadOnlyList<OrderLineRequest> lines, CancellationToken cancellationToken)

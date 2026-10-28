@@ -17,13 +17,14 @@ namespace WarehouseFlow.Api.Controllers;
 [Authorize(Policy = PermissionCodes.QualityOperate)]
 public sealed class QualityInspectionsController(WmsDbContext db, IDistributedCache cache, IHubContext<InventoryHub> hub, DocumentNumberService numbers) : ControllerBase
 {
+    /// <summary>查询采购收货质检工单及检验明细，用于跟踪待检任务和检验员工工作量。</summary>
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken cancellationToken) => Ok(await db.QualityInspections.AsNoTracking()
         .Include(x => x.Lines).ThenInclude(x => x.Product)
         .OrderByDescending(x => x.CreatedAt)
         .Select(x => new
         {
-            x.InspectionNo, x.SourceInboundOrderNo, x.SupplierName, x.Status, x.Inspector, x.Remark, x.CreatedAt, x.CompletedAt,
+            x.InspectionNo, x.SourceInboundOrderNo, x.SupplierName, x.Status, x.Inspector, x.Remark, x.CreatedAt, x.CompletedAt, totalInspectedQuantity = x.Lines.Sum(l => l.ReceivedQuantity),
             lines = x.Lines.Select(l => new { sku = l.Product!.Sku, productName = l.Product.Name, l.ReceivedQuantity, l.QualifiedQuantity, l.RejectedQuantity, l.Result, l.Remark })
         }).ToListAsync(cancellationToken));
 
@@ -53,7 +54,8 @@ public sealed class QualityInspectionsController(WmsDbContext db, IDistributedCa
             .SingleOrDefaultAsync(x => x.OrderNo == request.InboundOrderNo, cancellationToken);
         if (inbound is null) return NotFound(new { message = "来源入库单不存在" });
         if (inbound.Status != OrderStatus.Completed) return Conflict(new { message = "入库单完成收货后才能创建质检单" });
-        if (inbound.Lines.Count == 0 || inbound.Lines.Any(x => x.ReceivedQuantity <= 0)) return Conflict(new { message = "来源入库单没有可检验数量" });
+        var qualityLines = inbound.Lines.Where(x => x.Product!.RequiresQuality && x.ReceivedQuantity > 0).ToList();
+        if (qualityLines.Count == 0) return Conflict(new { message = "来源入库单没有需要质检的物料；请在物料档案中启用收货质检" });
         if (await db.QualityInspections.AnyAsync(x => x.SourceInboundOrderNo == request.InboundOrderNo && x.Status != QualityInspectionStatus.Cancelled, cancellationToken))
             return Conflict(new { message = "该入库单已有有效质检单" });
 
@@ -66,7 +68,7 @@ public sealed class QualityInspectionsController(WmsDbContext db, IDistributedCa
             Inspector = actor,
             Remark = request.Remark
         };
-        inspection.Lines.AddRange(inbound.Lines.Select(x => new QualityInspectionLine
+        inspection.Lines.AddRange(qualityLines.Select(x => new QualityInspectionLine
         {
             ProductId = x.ProductId,
             ReceivedQuantity = x.ReceivedQuantity
@@ -110,37 +112,38 @@ public sealed class QualityInspectionsController(WmsDbContext db, IDistributedCa
             line.Remark = item.Remark;
         }
 
-        var holds = inspection.Lines.Where(x => x.RejectedQuantity > 0).GroupBy(x => x.ProductId)
-            .ToDictionary(x => x.Key, x => x.Sum(line => line.RejectedQuantity));
-        if (holds.Count > 0)
+        var quarantinedReceipts = await db.Movements.Where(x => x.Type == InventoryMovementType.QualityHold
+                && x.ReferenceNo == inspection.SourceInboundOrderNo)
+            .OrderBy(x => x.CreatedAt).ToListAsync(cancellationToken);
+        if (quarantinedReceipts.Count > 0)
         {
-            var productIds = holds.Keys.ToList();
-            var receipts = await db.Movements.Where(x => x.Type == InventoryMovementType.Receive
-                    && x.ReferenceNo == inspection.SourceInboundOrderNo && productIds.Contains(x.ProductId))
-                .OrderBy(x => x.CreatedAt).ToListAsync(cancellationToken);
-            var balanceIds = receipts.Select(x => x.LocationId).Distinct().ToList();
-            var balances = await db.Inventory.Where(x => productIds.Contains(x.ProductId) && balanceIds.Contains(x.LocationId)).ToListAsync(cancellationToken);
-            var capacities = balances.ToDictionary(x => x.Id, x => Math.Max(0, x.OnHand - x.Reserved - x.QualityHold));
-
-            foreach (var hold in holds)
+            var quarantinedProductIds = quarantinedReceipts.Select(x => x.ProductId).Distinct().ToList();
+            var quarantinedLocationIds = quarantinedReceipts.Select(x => x.LocationId).Distinct().ToList();
+            var balances = await db.Inventory.Where(x => quarantinedProductIds.Contains(x.ProductId) && quarantinedLocationIds.Contains(x.LocationId)).ToListAsync(cancellationToken);
+            foreach (var line in inspection.Lines)
             {
-                var remaining = hold.Value;
-                foreach (var movement in receipts.Where(x => x.ProductId == hold.Key))
+                var receipts = quarantinedReceipts.Where(x => x.ProductId == line.ProductId).ToList();
+                if (receipts.Sum(x => x.Quantity) != line.ReceivedQuantity)
+                    return Conflict(new { message = $"SKU {line.Product!.Sku} 的待检库存与收货数量不一致，请核对入库流水" });
+
+                var remainingToRelease = line.QualifiedQuantity;
+                foreach (var movement in receipts)
                 {
-                    if (remaining <= 0) break;
+                    if (remainingToRelease <= 0) break;
                     var balance = balances.SingleOrDefault(x => x.ProductId == movement.ProductId && x.LocationId == movement.LocationId && x.BatchNo == movement.BatchNo);
-                    if (balance is null) continue;
-                    var quantity = Math.Min(remaining, Math.Min(movement.Quantity, capacities[balance.Id]));
+                    var quantity = Math.Min(remainingToRelease, movement.Quantity);
                     if (quantity <= 0) continue;
-                    balance.QualityHold += quantity;
-                    capacities[balance.Id] -= quantity;
-                    remaining -= quantity;
+                    if (balance is null || balance.QualityHold < quantity)
+                        return Conflict(new { message = $"SKU {line.Product!.Sku} 的待检库存状态异常，不能完成质检放行" });
+
+                    balance.QualityHold -= quantity;
+                    remainingToRelease -= quantity;
                     db.Movements.Add(new InventoryMovement
                     {
                         ProductId = balance.ProductId,
                         LocationId = balance.LocationId,
-                        Type = InventoryMovementType.QualityHold,
-                        Quantity = quantity,
+                        Type = InventoryMovementType.QualityRelease,
+                        Quantity = -quantity,
                         BatchNo = balance.BatchNo,
                         ExpiryDate = balance.ExpiryDate,
                         ReferenceNo = inspection.InspectionNo,
@@ -148,8 +151,54 @@ public sealed class QualityInspectionsController(WmsDbContext db, IDistributedCa
                     });
                 }
 
-                if (remaining > 0)
-                    return Conflict(new { message = $"SKU {inspection.Lines.Single(x => x.ProductId == hold.Key).Product!.Sku} 当前可冻结库存不足，可能已被预占或出库" });
+                if (remainingToRelease > 0)
+                    return Conflict(new { message = $"SKU {line.Product!.Sku} 的合格待检库存不足，不能完成质检放行" });
+            }
+        }
+        else
+        {
+            // 兼容上线此隔离流程前已经收货、且库存尚未建立待检记录的历史单据。
+            var holds = inspection.Lines.Where(x => x.RejectedQuantity > 0).GroupBy(x => x.ProductId)
+                .ToDictionary(x => x.Key, x => x.Sum(line => line.RejectedQuantity));
+            if (holds.Count > 0)
+            {
+                var productIds = holds.Keys.ToList();
+                var receipts = await db.Movements.Where(x => x.Type == InventoryMovementType.Receive
+                        && x.ReferenceNo == inspection.SourceInboundOrderNo && productIds.Contains(x.ProductId))
+                    .OrderBy(x => x.CreatedAt).ToListAsync(cancellationToken);
+                var balanceIds = receipts.Select(x => x.LocationId).Distinct().ToList();
+                var balances = await db.Inventory.Where(x => productIds.Contains(x.ProductId) && balanceIds.Contains(x.LocationId)).ToListAsync(cancellationToken);
+                var capacities = balances.ToDictionary(x => x.Id, x => Math.Max(0, x.OnHand - x.Reserved - x.QualityHold));
+
+                foreach (var hold in holds)
+                {
+                    var remaining = hold.Value;
+                    foreach (var movement in receipts.Where(x => x.ProductId == hold.Key))
+                    {
+                        if (remaining <= 0) break;
+                        var balance = balances.SingleOrDefault(x => x.ProductId == movement.ProductId && x.LocationId == movement.LocationId && x.BatchNo == movement.BatchNo);
+                        if (balance is null) continue;
+                        var quantity = Math.Min(remaining, Math.Min(movement.Quantity, capacities[balance.Id]));
+                        if (quantity <= 0) continue;
+                        balance.QualityHold += quantity;
+                        capacities[balance.Id] -= quantity;
+                        remaining -= quantity;
+                        db.Movements.Add(new InventoryMovement
+                        {
+                            ProductId = balance.ProductId,
+                            LocationId = balance.LocationId,
+                            Type = InventoryMovementType.QualityHold,
+                            Quantity = quantity,
+                            BatchNo = balance.BatchNo,
+                            ExpiryDate = balance.ExpiryDate,
+                            ReferenceNo = inspection.InspectionNo,
+                            Operator = User.FindFirstValue(ClaimTypes.Name) ?? request.Inspector
+                        });
+                    }
+
+                    if (remaining > 0)
+                        return Conflict(new { message = $"SKU {inspection.Lines.Single(x => x.ProductId == hold.Key).Product!.Sku} 当前可冻结库存不足，可能已被预占或出库" });
+                }
             }
         }
 
@@ -161,7 +210,7 @@ public sealed class QualityInspectionsController(WmsDbContext db, IDistributedCa
         await db.SaveChangesAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
         await cache.RemoveAsync("wms:inventory:all", cancellationToken);
-        await hub.Clients.All.SendAsync("InventoryChanged", new { action = "qualityHoldApplied", inspectionNo }, cancellationToken);
+        await hub.Clients.All.SendAsync("InventoryChanged", new { action = "qualityInspectionCompleted", inspectionNo }, cancellationToken);
         return Ok(new { inspection.InspectionNo, inspection.Status, inspection.CompletedAt, lines = inspection.Lines.Select(x => new { sku = x.Product!.Sku, x.ReceivedQuantity, x.QualifiedQuantity, x.RejectedQuantity, qualityHold = x.RejectedQuantity, x.Result }) });
     }
 

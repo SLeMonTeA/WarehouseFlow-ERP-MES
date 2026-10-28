@@ -24,6 +24,7 @@ public sealed class TraceForgeDbContext(DbContextOptions<TraceForgeDbContext> op
         modelBuilder.Entity<WorkOrder>().HasIndex(x => x.BatchNo);
         modelBuilder.Entity<WorkOrder>().Property(x => x.Status).HasConversion<string>();
         modelBuilder.Entity<QualityInspection>().Property(x => x.Result).HasConversion<string>();
+        modelBuilder.Entity<QualityInspection>().Property(x => x.OperationCode).HasMaxLength(100);
         modelBuilder.Entity<ErpSyncLog>().Property(x => x.Status).HasConversion<string>();
         modelBuilder.Entity<ErpReportDelivery>().Property(x => x.Status).HasConversion<string>();
         modelBuilder.Entity<ErpSyncCursor>().HasIndex(x => x.StreamName).IsUnique();
@@ -213,6 +214,8 @@ public static class TraceForgeDbInitializer
                 ALTER TABLE [WorkOrders] ADD [RoutingVersion] nvarchar(50) NOT NULL CONSTRAINT [DF_WorkOrders_RoutingVersion] DEFAULT N'';
             IF COL_LENGTH(N'[WorkOrders]', N'ArchivedAt') IS NULL
                 ALTER TABLE [WorkOrders] ADD [ArchivedAt] datetimeoffset NULL;
+            IF COL_LENGTH(N'[QualityInspections]', N'OperationCode') IS NULL
+                ALTER TABLE [QualityInspections] ADD [OperationCode] nvarchar(100) NOT NULL CONSTRAINT [DF_QualityInspections_OperationCode] DEFAULT N'';
             IF OBJECT_ID(N'[WorkOrderOperations]', N'U') IS NULL
             BEGIN
                 CREATE TABLE [WorkOrderOperations]

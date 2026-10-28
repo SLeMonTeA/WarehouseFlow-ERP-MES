@@ -12,4 +12,4 @@ public sealed record CreateWorkOrderRequest(
     IReadOnlyList<CreateWorkOrderOperationRequest>? Operations = null);
 public sealed record ReportOperationRequest(string OperationCode, string Workstation, decimal GoodQuantity, decimal DefectQuantity, string Operator, string? DeviceCode = null);
 public sealed record OperationExecutionRequest(string EventKey, string DeviceCode, string? Operator = null);
-public sealed record CreateInspectionRequest(string Checkpoint, InspectionResult Result, string? Remark, string Inspector);
+public sealed record CreateInspectionRequest(string Checkpoint, InspectionResult Result, string? Remark, string Inspector, string? OperationCode = null);
